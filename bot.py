@@ -8,27 +8,29 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import get_settings
 from db import init_db
-from handlers import simple_start, simple_compose, simple_channels, simple_manage, simple_analytics
+from handlers import menu, compose, posts, channels, categories, analytics, settings
 from middleware import AllowlistMiddleware
 
 logging.basicConfig(level=logging.INFO)
 
 
 async def main() -> None:
-    settings = get_settings()
+    settings_obj = get_settings()
     await init_db()
 
-    bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(token=settings_obj.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
 
     dp.update.outer_middleware(AllowlistMiddleware())
     
-    # Include handlers in order
-    dp.include_router(simple_start.router)
-    dp.include_router(simple_channels.router)
-    dp.include_router(simple_compose.router)
-    dp.include_router(simple_manage.router)
-    dp.include_router(simple_analytics.router)
+    # Include all handlers in proper order
+    dp.include_router(menu.router)
+    dp.include_router(compose.router)
+    dp.include_router(posts.router)
+    dp.include_router(channels.router)
+    dp.include_router(categories.router)
+    dp.include_router(analytics.router)
+    dp.include_router(settings.router)
 
     try:
         await dp.start_polling(bot)
