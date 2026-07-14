@@ -1,26 +1,50 @@
+"""Handler for managing categories."""
 from aiogram import Router, types
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 
 from db import session
-from models import Category, Channel
+from models import Category
 
 router = Router()
 
 
+class CategoryState(StatesGroup):
+    waiting_for_name = State()
+
+
 @router.message(Command("add_category"))
-async def add_category(message: types.Message):
-    """Add a new category"""
-    args = message.get_args()
-    if not args:
-        await message.reply("Usage: /add_category NAME", parse_mode=None)
+async def add_category_start(message: types.Message, state: FSMContext):
+    """Start adding a category"""
+    await message.reply(
+        "📁 Add Category\n\n"
+        "Send the category name:",
+        parse_mode=None
+    )
+    await state.set_state(CategoryState.waiting_for_name)
+
+
+@router.message(CategoryState.waiting_for_name)
+async def process_category_name(message: types.Message, state: FSMContext):
+    """Process category name"""
+    if not message.text:
+        await message.reply("Please send text for the category name", parse_mode=None)
         return
-    name = args.strip()
+
+    name = message.text.strip()
+    
     async with session() as s:
-        cat = Category(owner_user_id=message.from_user.id if message.from_user else 0, name=name)
+        cat = Category(
+            owner_user_id=message.from_user.id if message.from_user else 0,
+            name=name
+        )
         s.add(cat)
         await s.commit()
-        await message.reply(f"✓ Created category ID={cat.id} name={name}", parse_mode=None)
+        await message.reply(f"✅ Category created!\n\nID: {cat.id}\nName: {name}", parse_mode=None)
+    
+    await state.clear()
 
 
 @router.message(Command("list_categories"))
@@ -30,58 +54,14 @@ async def list_categories(message: types.Message):
         q = select(Category)
         res = await s.execute(q)
         rows = res.scalars().all()
-        if not rows:
-            await message.reply("No categories exist", parse_mode=None)
-            return
-        lines = [f"ID={r.id} name={r.name}" for r in rows]
-        await message.reply("\n".join(lines), parse_mode=None)
 
+    if not rows:
+        await message.reply("📁 No categories yet\n\nUse /add_category to create one", parse_mode=None)
+        return
 
-@router.message(Command("assign_category"))
-async def assign_category(message: types.Message):
-    """Assign a category to a channel"""
-    args = message.get_args()
-    if not args:
-        await message.reply("Usage: /assign_category CHANNEL_ID CATEGORY_ID", parse_mode=None)
-        return
-    parts = args.split()
-    if len(parts) < 2:
-        await message.reply("Usage: /assign_category CHANNEL_ID CATEGORY_ID", parse_mode=None)
-        return
-    ch_key = parts[0]
-    try:
-        cat_id = int(parts[1])
-    except ValueError:
-        await message.reply("CATEGORY_ID must be numeric", parse_mode=None)
-        return
+    text = "📁 Categories:\n\n"
+    for r in rows:
+        text += f"  ID: {r.id}\n  Name: {r.name}\n\n"
     
-    try:
-        ch_val = int(ch_key)
-    except ValueError:
-        await message.reply("CHANNEL_ID must be numeric", parse_mode=None)
-        return
-    
-    async with session() as s:
-        ch_q = select(Channel).where((Channel.chat_id == ch_val) | (Channel.id == ch_val))
-        cres = await s.execute(ch_q)
-        ch = cres.scalars().first()
-        if not ch:
-            await message.reply("Channel not found", parse_mode=None)
-            return
-        
-        cat_q = select(Category).where(Category.id == cat_id)
-        cres2 = await s.execute(cat_q)
-        cat = cres2.scalars().first()
-        if not cat:
-            await message.reply("Category not found", parse_mode=None)
-            return
-        
-        if cat in ch.categories:
-            await message.reply(f"Channel already in category '{cat.name}'", parse_mode=None)
-            return
-        
-        ch.categories.append(cat)
-        s.add(ch)
-        await s.commit()
-        await message.reply(f"✓ Channel {ch.title} assigned to category {cat.name}", parse_mode=None)
+    await message.reply(text.strip(), parse_mode=None)
 
