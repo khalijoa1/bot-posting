@@ -1,5 +1,6 @@
+"""Handler for managing channels."""
 from aiogram import F, Router, types
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
@@ -10,7 +11,7 @@ from models import Category, Channel
 router = Router()
 
 
-class AddChannelState(StatesGroup):
+class ChannelState(StatesGroup):
     waiting_for_chat_id = State()
     waiting_for_title = State()
     waiting_for_categories = State()
@@ -18,92 +19,123 @@ class AddChannelState(StatesGroup):
 
 @router.message(Command("add_channel"))
 async def add_channel_start(message: types.Message, state: FSMContext):
-    """Start the add channel flow"""
+    """Start adding a channel"""
+    kb = types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text="Back")]],
+        resize_keyboard=True
+    )
     await message.reply(
-        "Send the channel/group chat ID (e.g., -1001234567890)",
+        "📍 ADD CHANNEL\n\n"
+        "Send the chat ID:\n"
+        "(e.g., -1001234567890)",
+        reply_markup=kb,
         parse_mode=None
     )
-    await state.set_state(AddChannelState.waiting_for_chat_id)
+    await state.set_state(ChannelState.waiting_for_chat_id)
 
 
-@router.message(AddChannelState.waiting_for_chat_id)
+@router.message(ChannelState.waiting_for_chat_id)
 async def process_chat_id(message: types.Message, state: FSMContext):
-    """Process the chat ID input"""
-    chat_id_str = message.text.strip()
-    try:
-        chat_id_int = int(chat_id_str)
-    except ValueError:
-        await message.reply("Invalid chat ID. Please send a numeric ID (e.g., -1001234567890)")
+    """Process chat ID"""
+    if message.text == "Back":
+        await state.clear()
+        await message.reply("Cancelled", parse_mode=None)
         return
 
+    try:
+        chat_id = int(message.text.strip())
+    except ValueError:
+        await message.reply("❌ Invalid ID. Send numeric ID", parse_mode=None)
+        return
+
+    # Check if exists
     async with session() as s:
-        q = select(Channel).where(Channel.chat_id == chat_id_int)
+        q = select(Channel).where(Channel.chat_id == chat_id)
         res = await s.execute(q)
-        existing = res.scalars().first()
-        if existing:
-            await message.reply("This channel is already in the database.")
+        if res.scalars().first():
+            await message.reply("⚠️ Already added", parse_mode=None)
             await state.clear()
             return
 
-    await state.update_data(chat_id=chat_id_int)
-    await message.reply("Now send the channel title/name:", parse_mode=None)
-    await state.set_state(AddChannelState.waiting_for_title)
+    await state.update_data(chat_id=chat_id)
+    await message.reply("Now send channel title:", parse_mode=None)
+    await state.set_state(ChannelState.waiting_for_title)
 
 
-@router.message(AddChannelState.waiting_for_title)
+@router.message(ChannelState.waiting_for_title)
 async def process_title(message: types.Message, state: FSMContext):
-    """Process the title and move to category selection"""
+    """Process title"""
     title = message.text.strip()
     await state.update_data(title=title)
 
+    # Get categories
     async with session() as s:
         q = select(Category)
         res = await s.execute(q)
         categories = res.scalars().all()
 
     if not categories:
-        # No categories exist, skip to final add
+        # No categories - add directly
+        data = await state.get_data()
+        async with session() as s:
+            ch = Channel(
+                owner_user_id=message.from_user.id,
+                chat_id=data["chat_id"],
+                title=data["title"]
+            )
+            s.add(ch)
+            await s.commit()
+
         await message.reply(
-            f"No categories exist yet. Adding channel '{title}' without categories.",
+            f"✅ Channel Added!\n\n"
+            f"Title: {title}\n"
+            f"ID: {ch.id}",
             parse_mode=None
         )
-        data = await state.get_data()
-        await add_channel_to_db(message, state, data.get("chat_id"), data.get("title"), [])
         await state.clear()
         return
 
-    # Show category selection keyboard
+    # Show categories
     kb = types.InlineKeyboardMarkup(
         inline_keyboard=[
-            [types.InlineKeyboardButton(text=cat.name, callback_data=f"cat_{cat.id}")]
+            [types.InlineKeyboardButton(text=f"📁 {cat.name}", callback_data=f"cat_{cat.id}")]
             for cat in categories
-        ] + [[types.InlineKeyboardButton(text="✓ Done", callback_data="cat_done")]]
+        ] + [[types.InlineKeyboardButton(text="✅ Skip", callback_data="cat_skip")]]
     )
-    await message.reply("Select categories (tap to toggle):", reply_markup=kb, parse_mode=None)
+
+    await message.reply("Select categories (optional):", reply_markup=kb, parse_mode=None)
     await state.update_data(selected_categories=[])
-    await state.set_state(AddChannelState.waiting_for_categories)
+    await state.set_state(ChannelState.waiting_for_categories)
 
 
-@router.callback_query(AddChannelState.waiting_for_categories, F.data.startswith("cat_"))
-async def handle_category_selection(query: types.CallbackQuery, state: FSMContext):
-    """Handle category selection toggling"""
+@router.callback_query(ChannelState.waiting_for_categories)
+async def process_categories(query: types.CallbackQuery, state: FSMContext):
+    """Process category selection"""
     callback_data = query.data
 
-    if callback_data == "cat_done":
-        # Finished selecting categories
+    if callback_data == "cat_skip":
+        # Skip and add channel
         data = await state.get_data()
-        await add_channel_to_db(
-            query.message,
-            state,
-            data.get("chat_id"),
-            data.get("title"),
-            data.get("selected_categories", [])
+        async with session() as s:
+            ch = Channel(
+                owner_user_id=query.from_user.id,
+                chat_id=data["chat_id"],
+                title=data["title"]
+            )
+            s.add(ch)
+            await s.commit()
+
+        await query.message.reply(
+            f"✅ Channel Added!\n\n"
+            f"Title: {data['title']}\n"
+            f"ID: {ch.id}",
+            parse_mode=None
         )
-        await query.answer("Channel added!", show_alert=True)
         await state.clear()
+        await query.answer()
         return
 
-    # Toggle category selection
+    # Toggle category
     cat_id = int(callback_data.replace("cat_", ""))
     data = await state.get_data()
     selected = data.get("selected_categories", [])
@@ -115,7 +147,7 @@ async def handle_category_selection(query: types.CallbackQuery, state: FSMContex
 
     await state.update_data(selected_categories=selected)
 
-    # Rebuild keyboard with visual feedback
+    # Refresh keyboard
     async with session() as s:
         q = select(Category)
         res = await s.execute(q)
@@ -123,47 +155,47 @@ async def handle_category_selection(query: types.CallbackQuery, state: FSMContex
 
     kb = types.InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text=f"{'✓ ' if cat.id in selected else ''}{cat.name}",
-                    callback_data=f"cat_{cat.id}"
-                )
-            ]
+            [types.InlineKeyboardButton(
+                text=f"{'✅' if cat.id in selected else '⬜'} {cat.name}",
+                callback_data=f"cat_{cat.id}"
+            )]
             for cat in categories
-        ] + [[types.InlineKeyboardButton(text="✓ Done", callback_data="cat_done")]]
+        ] + [[types.InlineKeyboardButton(text="✅ Done", callback_data="cat_done")]]
     )
+
     await query.message.edit_reply_markup(reply_markup=kb)
     await query.answer()
 
+    # Check if this is the done click
+    if callback_data == "cat_done":
+        data = await state.get_data()
+        cat_ids = data.get("selected_categories", [])
 
-async def add_channel_to_db(
-    msg: types.Message,
-    state: FSMContext,
-    chat_id: int,
-    title: str,
-    category_ids: list
-):
-    """Add channel to database with selected categories"""
-    async with session() as s:
-        owner_id = msg.from_user.id if msg.from_user else 0
-        ch = Channel(owner_user_id=owner_id, chat_id=chat_id, title=title)
-        s.add(ch)
-        await s.flush()
+        async with session() as s:
+            ch = Channel(
+                owner_user_id=query.from_user.id,
+                chat_id=data["chat_id"],
+                title=data["title"]
+            )
+            s.add(ch)
+            await s.flush()
 
-        # Add to categories
-        if category_ids:
-            q = select(Category).where(Category.id.in_(category_ids))
-            res = await s.execute(q)
-            categories = res.scalars().all()
-            ch.categories = categories
+            if cat_ids:
+                cat_q = select(Category).where(Category.id.in_(cat_ids))
+                cat_res = await s.execute(cat_q)
+                cats = cat_res.scalars().all()
+                for cat in cats:
+                    ch.categories.append(cat)
 
-        await s.commit()
+            await s.commit()
 
-    cat_names = ", ".join([f"'{c}'" for c in category_ids]) if category_ids else "none"
-    await msg.reply(
-        f"✓ Channel '{title}' (ID: {chat_id}) added with categories: {cat_names}",
-        parse_mode=None
-    )
+        await query.message.reply(
+            f"✅ Channel Added!\n\n"
+            f"Title: {data['title']}\n"
+            f"Categories: {len(cat_ids)}",
+            parse_mode=None
+        )
+        await state.clear()
 
 
 @router.message(Command("list_channels"))
@@ -172,35 +204,40 @@ async def list_channels(message: types.Message):
     async with session() as s:
         q = select(Channel)
         res = await s.execute(q)
-        rows = res.scalars().all()
-        if not rows:
-            await message.reply("No channels registered", parse_mode=None)
-            return
-        lines = [f"ID={r.id} chat_id={r.chat_id} title={r.title}" for r in rows]
-        await message.reply("\n".join(lines), parse_mode=None)
+        channels = res.scalars().all()
+
+    if not channels:
+        await message.reply("📍 No channels yet\n\nUse /add_channel", parse_mode=None)
+        return
+
+    text = "📍 CHANNELS:\n\n"
+    for ch in channels:
+        text += f"ID: {ch.id}\nTitle: {ch.title}\nChat ID: {ch.chat_id}\n\n"
+
+    await message.reply(text.strip(), parse_mode=None)
 
 
 @router.message(Command("delete_channel"))
-async def delete_channel(message: types.Message):
-    """Delete a channel"""
-    args = message.get_args()
-    if not args:
-        await message.reply("Usage: /delete_channel ID", parse_mode=None)
+async def delete_channel_start(message: types.Message, state: FSMContext):
+    """Start deleting channel"""
+    await message.reply("Send channel ID to delete:", parse_mode=None)
+
+
+@router.message()
+async def delete_channel_process(message: types.Message):
+    """Process channel deletion"""
+    try:
+        ch_id = int(message.text.strip())
+    except ValueError:
+        await message.reply("Invalid ID", parse_mode=None)
         return
-    key = args.strip()
+
     async with session() as s:
-        try:
-            val = int(key)
-        except ValueError:
-            await message.reply("Invalid ID", parse_mode=None)
-            return
-        q = select(Channel).where((Channel.chat_id == val) | (Channel.id == val))
-        res = await s.execute(q)
-        row = res.scalars().first()
-        if not row:
-            await message.reply("Channel not found", parse_mode=None)
-            return
-        await s.delete(row)
-        await s.commit()
-        await message.reply("Channel deleted", parse_mode=None)
+        ch = await s.get(Channel, ch_id)
+        if ch:
+            await s.delete(ch)
+            await s.commit()
+            await message.reply("✅ Deleted", parse_mode=None)
+        else:
+            await message.reply("❌ Not found", parse_mode=None)
 
