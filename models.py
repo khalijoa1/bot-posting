@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, String, Table, UniqueConstraint, func
+from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, String, Table, UniqueConstraint, func, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db import Base
@@ -34,6 +34,7 @@ class Channel(Base):
     owner_user_id: Mapped[int] = mapped_column(Integer, index=True)
     chat_id: Mapped[int] = mapped_column(Integer, unique=True)
     title: Mapped[str] = mapped_column(String(255))
+    auto_approve_members: Mapped[bool] = mapped_column(Boolean, default=False)
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     targets: Mapped[list["PostTarget"]] = relationship(back_populates="channel")
@@ -64,7 +65,7 @@ class Post(Base):
     text: Mapped[str | None] = mapped_column(String(4096), nullable=True)
     photo_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[PostStatus] = mapped_column(Enum(PostStatus, name="post_status"), default=PostStatus.DRAFT)
-    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scheduled_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     auto_delete_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     delete_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -111,13 +112,8 @@ class RepostRule(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source_channel_id: Mapped[int] = mapped_column(ForeignKey("source_channels.id", ondelete="CASCADE"))
     destination_channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
-    # Optional caption template applied after the message is copied. Use placeholders like
-    # {original_text}, {source_title}, {source_username}, {post_url}
     caption_template: Mapped[str | None] = mapped_column(String(2048), nullable=True)
-    # Optional JSON string describing replacements. Format example:
-    # {"default": {"foo": "bar"}, "-1001234567890": {"Hello": "Hi"}}
     replacements_json: Mapped[str | None] = mapped_column(String, nullable=True)
-    # Optional per-rule auto-delete (seconds). If set, created Post.delete_at will be now()+seconds
     auto_delete_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

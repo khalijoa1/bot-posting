@@ -1,6 +1,8 @@
 """Handler for composing and posting messages to multiple channels."""
+import asyncio
+from datetime import datetime, timedelta
 from aiogram import F, Router, types
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
@@ -13,107 +15,223 @@ router = Router()
 
 class ComposeState(StatesGroup):
     waiting_for_content = State()
-    waiting_for_channel_selection = State()
-    confirming_post = State()
+    waiting_for_link_replacement = State()
+    waiting_for_schedule = State()
+    waiting_for_duration = State()
+    waiting_for_channels = State()
+    confirming = State()
+
+
+def create_channel_kb(channels, selected):
+    """Create inline keyboard for channel selection"""
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(
+                text=f"{'✅' if ch.id in selected else '⬜'} {ch.title}",
+                callback_data=f"comp_ch_{ch.id}"
+            )]
+            for ch in channels
+        ] + [[types.InlineKeyboardButton(text="✅ NEXT", callback_data="comp_next")]]
+    )
 
 
 @router.message(Command("compose"))
 async def compose_start(message: types.Message, state: FSMContext):
-    """Start composing a message"""
+    """Start composing"""
+    kb = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="Back")],
+        ],
+        resize_keyboard=True
+    )
     await message.reply(
         "✏️ COMPOSE MESSAGE\n\n"
-        "Send the message you want to post (text only for now):\n\n"
-        "(You'll select channels next)",
+        "Send your message:",
+        reply_markup=kb,
         parse_mode=None
     )
     await state.set_state(ComposeState.waiting_for_content)
 
 
 @router.message(ComposeState.waiting_for_content)
-async def process_content(message: types.Message, state: FSMContext):
-    """Process the message content"""
-    if not message.text:
-        await message.reply("⚠️ Please send text", parse_mode=None)
+async def handle_content(message: types.Message, state: FSMContext):
+    """Handle message content"""
+    if message.text == "Back":
+        await state.clear()
+        await message.reply("Cancelled", parse_mode=None)
         return
 
-    content_text = message.text
-    await state.update_data(content_text=content_text)
+    if not message.text:
+        await message.reply("Send text", parse_mode=None)
+        return
 
-    # Show channels to select
+    await state.update_data(content=message.text)
+    
+    kb = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="Skip")],
+            [types.KeyboardButton(text="Back")],
+        ],
+        resize_keyboard=True
+    )
+    await message.reply(
+        "🔗 Replace links? (format: old_link|new_link each on new line)\n\n"
+        "Or tap Skip:",
+        reply_markup=kb,
+        parse_mode=None
+    )
+    await state.set_state(ComposeState.waiting_for_link_replacement)
+
+
+@router.message(ComposeState.waiting_for_link_replacement)
+async def handle_links(message: types.Message, state: FSMContext):
+    """Handle link replacement"""
+    if message.text == "Back":
+        await state.set_state(ComposeState.waiting_for_content)
+        await message.reply("Go back", parse_mode=None)
+        return
+
+    if message.text != "Skip":
+        links = {}
+        for line in message.text.split("\n"):
+            if "|" in line:
+                old, new = line.split("|", 1)
+                links[old.strip()] = new.strip()
+        await state.update_data(link_replacements=links)
+    else:
+        await state.update_data(link_replacements={})
+
+    kb = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="Post Now")],
+            [types.KeyboardButton(text="Schedule")],
+            [types.KeyboardButton(text="Back")],
+        ],
+        resize_keyboard=True
+    )
+    await message.reply(
+        "⏰ When to post?",
+        reply_markup=kb,
+        parse_mode=None
+    )
+    await state.set_state(ComposeState.waiting_for_schedule)
+
+
+@router.message(ComposeState.waiting_for_schedule)
+async def handle_schedule(message: types.Message, state: FSMContext):
+    """Handle scheduling"""
+    if message.text == "Back":
+        await state.set_state(ComposeState.waiting_for_link_replacement)
+        return
+
+    if message.text == "Post Now":
+        await state.update_data(schedule_time=None, duration=None)
+    elif message.text == "Schedule":
+        kb = types.ReplyKeyboardMarkup(
+            keyboard=[
+                [types.KeyboardButton(text="1 hour")],
+                [types.KeyboardButton(text="2 hours")],
+                [types.KeyboardButton(text="6 hours")],
+                [types.KeyboardButton(text="24 hours")],
+                [types.KeyboardButton(text="Custom (minutes)")],
+                [types.KeyboardButton(text="Back")],
+            ],
+            resize_keyboard=True
+        )
+        await message.reply("How long from now?", reply_markup=kb, parse_mode=None)
+        await state.set_state(ComposeState.waiting_for_duration)
+        return
+    else:
+        await message.reply("Choose an option", parse_mode=None)
+        return
+
+    # Show channels
     async with session() as s:
         q = select(Channel)
         res = await s.execute(q)
         channels = res.scalars().all()
 
     if not channels:
-        await message.reply(
-            "❌ No channels available\n\n"
-            "Add channels first with /add_channel",
-            parse_mode=None
-        )
+        await message.reply("❌ No channels. Add with /add_channel", parse_mode=None)
         await state.clear()
         return
 
-    # Create inline keyboard for channel selection
-    kb = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [types.InlineKeyboardButton(text=ch.title, callback_data=f"ch_{ch.id}")]
-            for ch in channels
-        ] + [[types.InlineKeyboardButton(text="✅ POST", callback_data="ch_done")]]
-    )
-
+    await state.update_data(selected_channels=[])
     await message.reply(
         "📍 SELECT CHANNELS\n\n"
-        "Tap channels to add to post:\n\n"
-        "(Green checkmark = selected)",
-        reply_markup=kb,
+        "Tap to toggle:",
+        reply_markup=create_channel_kb(channels, []),
         parse_mode=None
     )
-    await state.update_data(selected_channels=[])
-    await state.set_state(ComposeState.waiting_for_channel_selection)
+    await state.set_state(ComposeState.waiting_for_channels)
 
 
-@router.callback_query(ComposeState.waiting_for_channel_selection, F.data.startswith("ch_"))
-async def handle_channel_selection(query: types.CallbackQuery, state: FSMContext):
-    """Handle channel selection"""
-    if query.data == "ch_done":
-        data = await state.get_data()
-        selected = data.get("selected_channels", [])
+@router.message(ComposeState.waiting_for_duration)
+async def handle_duration(message: types.Message, state: FSMContext):
+    """Handle duration"""
+    if message.text == "Back":
+        await state.set_state(ComposeState.waiting_for_schedule)
+        return
 
-        if not selected:
-            await query.answer("❌ Select at least one channel!", show_alert=True)
+    duration_map = {
+        "1 hour": 60,
+        "2 hours": 120,
+        "6 hours": 360,
+        "24 hours": 1440,
+    }
+
+    if message.text in duration_map:
+        minutes = duration_map[message.text]
+        schedule_time = datetime.now() + timedelta(minutes=minutes)
+        await state.update_data(schedule_time=schedule_time, duration=minutes)
+    elif message.text == "Custom (minutes)":
+        await message.reply("Send minutes:", parse_mode=None)
+        return
+    else:
+        try:
+            minutes = int(message.text)
+            schedule_time = datetime.now() + timedelta(minutes=minutes)
+            await state.update_data(schedule_time=schedule_time, duration=minutes)
+        except ValueError:
+            await message.reply("Invalid. Choose option or send number", parse_mode=None)
             return
 
-        # Show confirmation
-        async with session() as s:
-            q = select(Channel).where(Channel.id.in_(selected))
-            res = await s.execute(q)
-            selected_ch = res.scalars().all()
+    # Show channels
+    async with session() as s:
+        q = select(Channel)
+        res = await s.execute(q)
+        channels = res.scalars().all()
 
-        ch_names = "\n".join([f"  • {ch.title}" for ch in selected_ch])
-        content = data.get("content_text", "")
-        preview = content[:100] + ("..." if len(content) > 100 else "")
+    if not channels:
+        await message.reply("❌ No channels", parse_mode=None)
+        await state.clear()
+        return
 
-        kb = types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [types.InlineKeyboardButton(text="✅ POST NOW", callback_data="confirm_post")],
-                [types.InlineKeyboardButton(text="❌ CANCEL", callback_data="cancel_post")]
-            ]
-        )
+    await state.update_data(selected_channels=[])
+    await message.reply(
+        "📍 SELECT CHANNELS:",
+        reply_markup=create_channel_kb(channels, []),
+        parse_mode=None
+    )
+    await state.set_state(ComposeState.waiting_for_channels)
 
-        await query.message.reply(
-            f"📤 CONFIRM POST\n\n"
-            f"Message:\n{preview}\n\n"
-            f"Will post to:\n{ch_names}",
-            reply_markup=kb,
-            parse_mode=None
-        )
-        await state.set_state(ComposeState.confirming_post)
+
+@router.callback_query(ComposeState.waiting_for_channels, F.data.startswith("comp_"))
+async def handle_channels(query: types.CallbackQuery, state: FSMContext):
+    """Handle channel selection"""
+    if query.data == "comp_next":
+        data = await state.get_data()
+        if not data.get("selected_channels"):
+            await query.answer("Select channels!", show_alert=True)
+            return
+
+        await confirm_post(query.message, state, query.bot)
+        await state.set_state(ComposeState.confirming)
         await query.answer()
         return
 
-    # Toggle channel selection
-    ch_id = int(query.data.replace("ch_", ""))
+    # Toggle channel
+    ch_id = int(query.data.replace("comp_ch_", ""))
     data = await state.get_data()
     selected = data.get("selected_channels", [])
 
@@ -124,93 +242,66 @@ async def handle_channel_selection(query: types.CallbackQuery, state: FSMContext
 
     await state.update_data(selected_channels=selected)
 
-    # Rebuild keyboard with checkmarks
     async with session() as s:
         q = select(Channel)
         res = await s.execute(q)
         channels = res.scalars().all()
 
-    kb = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text=f"{'✅ ' if ch.id in selected else '⬜ '}{ch.title}",
-                    callback_data=f"ch_{ch.id}"
-                )
-            ]
-            for ch in channels
-        ] + [[types.InlineKeyboardButton(text="✅ POST", callback_data="ch_done")]]
-    )
-    await query.message.edit_reply_markup(reply_markup=kb)
+    await query.message.edit_reply_markup(reply_markup=create_channel_kb(channels, selected))
     await query.answer()
 
 
-@router.callback_query(ComposeState.confirming_post)
-async def confirm_post(query: types.CallbackQuery, state: FSMContext):
-    """Confirm and post the message"""
-    if query.data == "cancel_post":
-        await query.message.reply("❌ Cancelled", parse_mode=None)
-        await state.clear()
-        await query.answer()
-        return
-
-    if query.data != "confirm_post":
-        await query.answer()
-        return
-
+async def confirm_post(message: types.Message, state: FSMContext, bot: types.Bot):
+    """Confirm and send post"""
     data = await state.get_data()
-    bot = query.bot
-    content_text = data.get("content_text", "")
-    channel_ids = data.get("selected_channels", [])
+    content = data.get("content")
+    channels_ids = data.get("selected_channels", [])
+    schedule_time = data.get("schedule_time")
+    links = data.get("link_replacements", {})
 
-    # Post to channels
-    success_count = 0
-    failed_channels = []
+    # Replace links
+    final_content = content
+    for old, new in links.items():
+        final_content = final_content.replace(old, new)
 
     async with session() as s:
-        # Create post record
+        q = select(Channel).where(Channel.id.in_(channels_ids))
+        res = await s.execute(q)
+        channels = res.scalars().all()
+
+        # Create post
         post = Post(
-            owner_user_id=query.from_user.id,
+            owner_user_id=message.chat.id,
             content_type=ContentType.TEXT,
-            text=content_text,
-            status=PostStatus.SENT
+            text=final_content,
+            status=PostStatus.SENT if not schedule_time else PostStatus.SCHEDULED,
+            scheduled_time=schedule_time
         )
         s.add(post)
         await s.flush()
 
-        # Post to all selected channels
-        for ch_id in channel_ids:
-            ch = await s.get(Channel, ch_id)
-            if not ch:
-                failed_channels.append(f"Channel {ch_id}")
-                continue
+        # Post now or schedule
+        if not schedule_time:
+            for ch in channels:
+                try:
+                    sent = await bot.send_message(chat_id=ch.chat_id, text=final_content)
+                    target = PostTarget(post_id=post.id, channel_id=ch.id, message_id=sent.message_id)
+                    s.add(target)
+                except Exception as e:
+                    await message.reply(f"❌ {ch.title}: {str(e)[:50]}", parse_mode=None)
 
-            try:
-                # Send message to channel
-                sent_msg = await bot.send_message(
-                    chat_id=ch.chat_id,
-                    text=content_text
-                )
+            await s.commit()
+            await message.reply(
+                f"✅ POSTED!\n\nChannels: {len(channels)}\nPost ID: {post.id}",
+                parse_mode=None
+            )
+        else:
+            await s.commit()
+            await message.reply(
+                f"✅ SCHEDULED!\n\nTime: {schedule_time.strftime('%Y-%m-%d %H:%M')}\n"
+                f"Channels: {len(channels)}\nPost ID: {post.id}",
+                parse_mode=None
+            )
 
-                # Record the sent message
-                target = PostTarget(
-                    post_id=post.id,
-                    channel_id=ch_id,
-                    message_id=sent_msg.message_id
-                )
-                s.add(target)
-                success_count += 1
-            except Exception as e:
-                failed_channels.append(f"{ch.title} ({str(e)[:30]})")
-
-        await s.commit()
-
-    # Send result message
-    result_text = f"✅ POSTED!\n\nChannels: {success_count}/{len(channel_ids)}\nPost ID: {post.id}"
-    if failed_channels:
-        result_text += f"\n\n❌ Failed:\n" + "\n".join([f"  • {c}" for c in failed_channels])
-
-    await query.message.reply(result_text, parse_mode=None)
     await state.clear()
-    await query.answer()
 
