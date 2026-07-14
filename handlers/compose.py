@@ -21,8 +21,9 @@ class ComposeState(StatesGroup):
 async def compose_start(message: types.Message, state: FSMContext):
     """Start composing a message"""
     await message.reply(
-        "📝 Compose Mode\n\n"
-        "Send the message you want to post (text, photo, or video):",
+        "✏️ COMPOSE MESSAGE\n\n"
+        "Send the message you want to post (text only for now):\n\n"
+        "(You'll select channels next)",
         parse_mode=None
     )
     await state.set_state(ComposeState.waiting_for_content)
@@ -31,22 +32,12 @@ async def compose_start(message: types.Message, state: FSMContext):
 @router.message(ComposeState.waiting_for_content)
 async def process_content(message: types.Message, state: FSMContext):
     """Process the message content"""
-    if message.text:
-        content_type = ContentType.TEXT
-        content_data = message.text
-    elif message.photo:
-        content_type = ContentType.PHOTO
-        content_data = message.photo[-1].file_id
-    else:
-        await message.reply("Only text and photos are supported.", parse_mode=None)
+    if not message.text:
+        await message.reply("⚠️ Please send text", parse_mode=None)
         return
 
-    await state.update_data(
-        content_type=content_type,
-        content_data=content_data,
-        text=message.text if message.text else None,
-        photo_file_id=message.photo[-1].file_id if message.photo else None
-    )
+    content_text = message.text
+    await state.update_data(content_text=content_text)
 
     # Show channels to select
     async with session() as s:
@@ -55,17 +46,29 @@ async def process_content(message: types.Message, state: FSMContext):
         channels = res.scalars().all()
 
     if not channels:
-        await message.reply("❌ No channels configured. Add channels first with /add_channel", parse_mode=None)
+        await message.reply(
+            "❌ No channels available\n\n"
+            "Add channels first with /add_channel",
+            parse_mode=None
+        )
         await state.clear()
         return
 
+    # Create inline keyboard for channel selection
     kb = types.InlineKeyboardMarkup(
         inline_keyboard=[
             [types.InlineKeyboardButton(text=ch.title, callback_data=f"ch_{ch.id}")]
             for ch in channels
-        ] + [[types.InlineKeyboardButton(text="✓ Done", callback_data="ch_done")]]
+        ] + [[types.InlineKeyboardButton(text="✅ POST", callback_data="ch_done")]]
     )
-    await message.reply("Select channels to post to (tap to toggle):", reply_markup=kb, parse_mode=None)
+
+    await message.reply(
+        "📍 SELECT CHANNELS\n\n"
+        "Tap channels to add to post:\n\n"
+        "(Green checkmark = selected)",
+        reply_markup=kb,
+        parse_mode=None
+    )
     await state.update_data(selected_channels=[])
     await state.set_state(ComposeState.waiting_for_channel_selection)
 
@@ -75,28 +78,36 @@ async def handle_channel_selection(query: types.CallbackQuery, state: FSMContext
     """Handle channel selection"""
     if query.data == "ch_done":
         data = await state.get_data()
-        if not data.get("selected_channels"):
-            await query.answer("Select at least one channel!", show_alert=True)
+        selected = data.get("selected_channels", [])
+
+        if not selected:
+            await query.answer("❌ Select at least one channel!", show_alert=True)
             return
 
         # Show confirmation
         async with session() as s:
-            q = select(Channel).where(Channel.id.in_(data.get("selected_channels")))
+            q = select(Channel).where(Channel.id.in_(selected))
             res = await s.execute(q)
             selected_ch = res.scalars().all()
 
-        ch_names = ", ".join([ch.title for ch in selected_ch])
-        preview = (
-            f"📝 Preview:\n\n{data.get('text', '[Photo]')}\n\n"
-            f"📤 Will post to: {ch_names}"
-        )
+        ch_names = "\n".join([f"  • {ch.title}" for ch in selected_ch])
+        content = data.get("content_text", "")
+        preview = content[:100] + ("..." if len(content) > 100 else "")
+
         kb = types.InlineKeyboardMarkup(
             inline_keyboard=[
-                [types.InlineKeyboardButton(text="✓ Post", callback_data="confirm_post")],
-                [types.InlineKeyboardButton(text="✗ Cancel", callback_data="cancel_post")]
+                [types.InlineKeyboardButton(text="✅ POST NOW", callback_data="confirm_post")],
+                [types.InlineKeyboardButton(text="❌ CANCEL", callback_data="cancel_post")]
             ]
         )
-        await query.message.reply(preview, reply_markup=kb, parse_mode=None)
+
+        await query.message.reply(
+            f"📤 CONFIRM POST\n\n"
+            f"Message:\n{preview}\n\n"
+            f"Will post to:\n{ch_names}",
+            reply_markup=kb,
+            parse_mode=None
+        )
         await state.set_state(ComposeState.confirming_post)
         await query.answer()
         return
@@ -113,7 +124,7 @@ async def handle_channel_selection(query: types.CallbackQuery, state: FSMContext
 
     await state.update_data(selected_channels=selected)
 
-    # Rebuild keyboard
+    # Rebuild keyboard with checkmarks
     async with session() as s:
         q = select(Channel)
         res = await s.execute(q)
@@ -123,12 +134,12 @@ async def handle_channel_selection(query: types.CallbackQuery, state: FSMContext
         inline_keyboard=[
             [
                 types.InlineKeyboardButton(
-                    text=f"{'✓ ' if ch.id in selected else ''}{ch.title}",
+                    text=f"{'✅ ' if ch.id in selected else '⬜ '}{ch.title}",
                     callback_data=f"ch_{ch.id}"
                 )
             ]
             for ch in channels
-        ] + [[types.InlineKeyboardButton(text="✓ Done", callback_data="ch_done")]]
+        ] + [[types.InlineKeyboardButton(text="✅ POST", callback_data="ch_done")]]
     )
     await query.message.edit_reply_markup(reply_markup=kb)
     await query.answer()
@@ -138,7 +149,7 @@ async def handle_channel_selection(query: types.CallbackQuery, state: FSMContext
 async def confirm_post(query: types.CallbackQuery, state: FSMContext):
     """Confirm and post the message"""
     if query.data == "cancel_post":
-        await query.message.reply("Cancelled.", parse_mode=None)
+        await query.message.reply("❌ Cancelled", parse_mode=None)
         await state.clear()
         await query.answer()
         return
@@ -149,37 +160,37 @@ async def confirm_post(query: types.CallbackQuery, state: FSMContext):
 
     data = await state.get_data()
     bot = query.bot
+    content_text = data.get("content_text", "")
+    channel_ids = data.get("selected_channels", [])
+
+    # Post to channels
+    success_count = 0
+    failed_channels = []
 
     async with session() as s:
         # Create post record
         post = Post(
             owner_user_id=query.from_user.id,
-            content_type=data.get("content_type"),
-            text=data.get("text"),
-            photo_file_id=data.get("photo_file_id"),
+            content_type=ContentType.TEXT,
+            text=content_text,
             status=PostStatus.SENT
         )
         s.add(post)
         await s.flush()
 
         # Post to all selected channels
-        channel_ids = data.get("selected_channels", [])
         for ch_id in channel_ids:
             ch = await s.get(Channel, ch_id)
             if not ch:
+                failed_channels.append(f"Channel {ch_id}")
                 continue
 
             try:
-                if data.get("content_type") == ContentType.TEXT:
-                    sent_msg = await bot.send_message(
-                        chat_id=ch.chat_id,
-                        text=data.get("text")
-                    )
-                elif data.get("content_type") == ContentType.PHOTO:
-                    sent_msg = await bot.send_photo(
-                        chat_id=ch.chat_id,
-                        photo=data.get("photo_file_id")
-                    )
+                # Send message to channel
+                sent_msg = await bot.send_message(
+                    chat_id=ch.chat_id,
+                    text=content_text
+                )
 
                 # Record the sent message
                 target = PostTarget(
@@ -188,12 +199,18 @@ async def confirm_post(query: types.CallbackQuery, state: FSMContext):
                     message_id=sent_msg.message_id
                 )
                 s.add(target)
+                success_count += 1
             except Exception as e:
-                await query.message.reply(f"❌ Failed to post to {ch.title}: {str(e)}", parse_mode=None)
+                failed_channels.append(f"{ch.title} ({str(e)[:30]})")
 
         await s.commit()
 
-    await query.message.reply(f"✓ Posted to {len(channel_ids)} channel(s)!", parse_mode=None)
+    # Send result message
+    result_text = f"✅ POSTED!\n\nChannels: {success_count}/{len(channel_ids)}\nPost ID: {post.id}"
+    if failed_channels:
+        result_text += f"\n\n❌ Failed:\n" + "\n".join([f"  • {c}" for c in failed_channels])
+
+    await query.message.reply(result_text, parse_mode=None)
     await state.clear()
     await query.answer()
 
