@@ -8,7 +8,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import get_settings
 from db import init_db
-from handlers import categories, channels, compose, manage, sources, reposter
+from handlers import categories, channels, repost_rules, sources, reposter
 from middleware import AllowlistMiddleware
 from services.scheduler import run_scheduler_loop
 
@@ -25,8 +25,7 @@ async def main() -> None:
     dp.update.outer_middleware(AllowlistMiddleware())
     dp.include_router(channels.router)
     dp.include_router(categories.router)
-    dp.include_router(compose.router)
-    dp.include_router(manage.router)
+    dp.include_router(repost_rules.router)
     dp.include_router(sources.router)
     dp.include_router(reposter.router)
 
