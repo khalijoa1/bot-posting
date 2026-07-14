@@ -12,15 +12,16 @@ async def start_handler(message: types.Message):
         f"👋 Welcome {user_name}!\n\n"
         "I'm an ADMIN HELPBOT for managing channels and posts.\n\n"
         "Available commands:\n"
-        "/add_channel <chat_id> <title> - Add a channel\n"
+        "/add_channel ID TITLE - Add a channel\n"
         "/list_channels - List all channels\n"
-        "/delete_channel <id> - Delete a channel\n"
-        "/add_category <name> - Add a category\n"
+        "/delete_channel ID - Delete a channel\n"
+        "/add_category NAME - Add a category\n"
         "/list_categories - List categories\n"
-        "/add_source <identifier> [title] - Add source channel to watch\n"
+        "/add_source IDENTIFIER [TITLE] - Add source channel to watch\n"
         "/list_sources - List source channels\n"
-        "/add_repost_rule <source_id> <dest_id> - Create reposting rule\n"
-        "/list_repost_rules - List reposting rules"
+        "/add_repost_rule SRC_ID DEST_ID - Create reposting rule\n"
+        "/list_repost_rules - List reposting rules",
+        parse_mode=None
     )
 
 
