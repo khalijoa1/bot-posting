@@ -1,76 +1,55 @@
-"""Handler for analytics and statistics."""
+"""Analytics and statistics."""
 from aiogram import Router, types
 from aiogram.filters import Command
 from sqlalchemy import func, select
 
 from db import session
-from models import Post, PostTarget, PostStatus
+from models import Post, PostTarget, PostStatus, Channel
 
 router = Router()
 
 
 @router.message(Command("analytics"))
 async def show_analytics(message: types.Message):
-    """Show analytics dashboard"""
+    """Show analytics dashboard."""
     async with session() as s:
         # Total posts
-        total_posts_q = select(func.count(Post.id)).where(Post.owner_user_id == message.from_user.id)
-        total_posts = (await s.execute(total_posts_q)).scalar() or 0
-
-        # Sent vs scheduled
+        total_q = select(func.count(Post.id)).where(Post.owner_user_id == message.from_user.id)
+        total_posts = (await s.execute(total_q)).scalar() or 0
+        
+        # Sent posts
         sent_q = select(func.count(Post.id)).where(
-            (Post.owner_user_id == message.from_user.id) & 
+            (Post.owner_user_id == message.from_user.id) &
             (Post.status == PostStatus.SENT)
         )
-        sent = (await s.execute(sent_q)).scalar() or 0
-
-        scheduled_q = select(func.count(Post.id)).where(
-            (Post.owner_user_id == message.from_user.id) & 
+        sent_posts = (await s.execute(sent_q)).scalar() or 0
+        
+        # Scheduled posts
+        sched_q = select(func.count(Post.id)).where(
+            (Post.owner_user_id == message.from_user.id) &
             (Post.status == PostStatus.SCHEDULED)
         )
-        scheduled = (await s.execute(scheduled_q)).scalar() or 0
-
-        # Total messages sent
-        total_targets_q = select(func.count(PostTarget.id)).join(Post).where(
+        scheduled_posts = (await s.execute(sched_q)).scalar() or 0
+        
+        # Total messages delivered
+        msg_q = select(func.count(PostTarget.id)).join(Post).where(
             Post.owner_user_id == message.from_user.id
         )
-        total_targets = (await s.execute(total_targets_q)).scalar() or 0
-
-    analytics_text = (
-        "📊 ANALYTICS\n\n"
+        total_messages = (await s.execute(msg_q)).scalar() or 0
+        
+        # Total channels
+        ch_q = select(func.count(Channel.id))
+        total_channels = (await s.execute(ch_q)).scalar() or 0
+    
+    await message.answer(
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📊 ANALYTICS DASHBOARD\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📝 Total Posts: {total_posts}\n"
-        f"✅ Sent: {sent}\n"
-        f"⏰ Scheduled: {scheduled}\n"
-        f"📤 Messages Delivered: {total_targets}\n"
+        f"   ✅ Sent: {sent_posts}\n"
+        f"   ⏰ Scheduled: {scheduled_posts}\n\n"
+        f"📤 Messages Delivered: {total_messages}\n"
+        f"📍 Channels Added: {total_channels}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
-
-    await message.reply(analytics_text, parse_mode=None)
-
-
-@router.message(Command("poststats"))
-async def post_stats(message: types.Message):
-    """Show detailed post statistics"""
-    async with session() as s:
-        posts_q = select(Post).where(Post.owner_user_id == message.from_user.id)
-        posts = (await s.execute(posts_q)).scalars().all()
-
-    if not posts:
-        await message.reply("📭 No posts yet", parse_mode=None)
-        return
-
-    stats_text = "📊 POST STATISTICS\n\n"
-    for p in posts:
-        async with session() as s:
-            targets_q = select(func.count(PostTarget.id)).where(PostTarget.post_id == p.id)
-            target_count = (await s.execute(targets_q)).scalar() or 0
-
-        preview = (p.text or "[Photo]")[:40]
-        stats_text += (
-            f"ID: {p.id}\n"
-            f"Text: {preview}...\n"
-            f"Channels: {target_count}\n"
-            f"Status: {p.status.value}\n\n"
-        )
-
-    await message.reply(stats_text, parse_mode=None)
 
