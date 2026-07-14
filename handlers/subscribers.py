@@ -83,27 +83,3 @@ async def toggle_auto_approve(query: types.CallbackQuery):
 
     await query.message.edit_reply_markup(reply_markup=kb)
 
-
-@router.chat_member()
-async def handle_chat_member(update: types.ChatMemberUpdated):
-    """Handle join requests and auto-approve if enabled"""
-    chat_id = update.chat.id
-    user_id = update.new_chat_member.user.id if update.new_chat_member else None
-
-    if not user_id:
-        return
-
-    # Check if auto-approve is enabled
-    async with session() as s:
-        ch_q = select(Channel).where(Channel.chat_id == chat_id)
-        res = await s.execute(ch_q)
-        ch = res.scalars().first()
-
-    if ch and ch.auto_approve_members:
-        bot = update.bot
-        try:
-            # Approve the join request
-            await bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
-        except Exception as e:
-            print(f"Could not auto-approve {user_id}: {e}")
-

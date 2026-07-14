@@ -1,7 +1,7 @@
 """Handler for composing and posting messages to multiple channels."""
 import asyncio
 from datetime import datetime, timedelta
-from aiogram import F, Router, types
+from aiogram import Bot, F, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -225,8 +225,8 @@ async def handle_channels(query: types.CallbackQuery, state: FSMContext):
             await query.answer("Select channels!", show_alert=True)
             return
 
-        await confirm_post(query.message, state, query.bot)
-        await state.set_state(ComposeState.confirming)
+        await confirm_and_post(query.message, state, query.bot)
+        await state.clear()
         await query.answer()
         return
 
@@ -251,7 +251,7 @@ async def handle_channels(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
 
 
-async def confirm_post(message: types.Message, state: FSMContext, bot: types.Bot):
+async def confirm_and_post(message: types.Message, state: FSMContext, bot: Bot):
     """Confirm and send post"""
     data = await state.get_data()
     content = data.get("content")
@@ -282,17 +282,19 @@ async def confirm_post(message: types.Message, state: FSMContext, bot: types.Bot
 
         # Post now or schedule
         if not schedule_time:
+            success = 0
             for ch in channels:
                 try:
                     sent = await bot.send_message(chat_id=ch.chat_id, text=final_content)
                     target = PostTarget(post_id=post.id, channel_id=ch.id, message_id=sent.message_id)
                     s.add(target)
+                    success += 1
                 except Exception as e:
                     await message.reply(f"❌ {ch.title}: {str(e)[:50]}", parse_mode=None)
 
             await s.commit()
             await message.reply(
-                f"✅ POSTED!\n\nChannels: {len(channels)}\nPost ID: {post.id}",
+                f"✅ POSTED!\n\nChannels: {success}/{len(channels)}\nPost ID: {post.id}",
                 parse_mode=None
             )
         else:
@@ -302,6 +304,4 @@ async def confirm_post(message: types.Message, state: FSMContext, bot: types.Bot
                 f"Channels: {len(channels)}\nPost ID: {post.id}",
                 parse_mode=None
             )
-
-    await state.clear()
 
