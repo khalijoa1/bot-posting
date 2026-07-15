@@ -46,6 +46,7 @@ async def messaging_menu(message: types.Message):
             [types.KeyboardButton(text="📋 View My Posts")],
             [types.KeyboardButton(text="✎️ Edit Post")],
             [types.KeyboardButton(text="🗑️ Delete Post")],
+            [types.KeyboardButton(text="🔗 Link Replacer")],
             [types.KeyboardButton(text="🔙 Back")],
         ],
         resize_keyboard=True
@@ -59,7 +60,8 @@ async def messaging_menu(message: types.Message):
         "📨 Category - Post to all in category\n"
         "📋 View - See your posts\n"
         "✎️ Edit - Change post text\n"
-        "🗑️ Delete - Remove post",
+        "🗑️ Delete - Remove post\n"
+        "🔗 Replacer - Replace links",
         reply_markup=kb
     )
 
@@ -159,7 +161,8 @@ async def help_cmd(message: types.Message):
         "/post_category - Post to category\n"
         "/myposts - View your posts\n"
         "/edit - Edit post\n"
-        "/delete - Delete post\n\n"
+        "/delete - Delete post\n"
+        "/replacer - Replace links\n\n"
         "📍 CHANNELS:\n"
         "/add_channel - Add channel\n"
         "/list_channels - View channels\n"
