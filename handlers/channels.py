@@ -1,4 +1,4 @@
-"""Channel management."""
+"""Channel management with categories and welcome messages."""
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -6,7 +6,7 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 
 from db import session
-from models import Channel
+from models import Channel, Category
 
 router = Router()
 
@@ -14,6 +14,8 @@ router = Router()
 class ChannelState(StatesGroup):
     chat_id = State()
     title = State()
+    select_categories = State()
+    welcome_msg = State()
     delete_id = State()
 
 
@@ -21,24 +23,23 @@ class ChannelState(StatesGroup):
 async def add_channel_start(message: types.Message, state: FSMContext):
     """Start adding channel."""
     await state.clear()
-    kb = types.ReplyKeyboardMarkup(
-        keyboard=[[types.KeyboardButton(text="🔙 Cancel")]],
-        resize_keyboard=True
-    )
     await message.answer(
         "━━━━━━━━━━━━━━━━━━\n"
         "➕ ADD CHANNEL\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        "Send the channel chat ID\n\n"
+        "Send chat ID:\n\n"
         "Format: -1001234567890",
-        reply_markup=kb
+        reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="❌ Cancel")]],
+            resize_keyboard=True
+        )
     )
     await state.set_state(ChannelState.chat_id)
 
 
-@router.message(ChannelState.chat_id, F.text == "🔙 Cancel")
+@router.message(ChannelState.chat_id, F.text == "❌ Cancel")
 async def cancel_add(message: types.Message, state: FSMContext):
-    """Cancel add channel."""
+    """Cancel add."""
     await state.clear()
     await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
 
@@ -49,61 +50,220 @@ async def get_chat_id(message: types.Message, state: FSMContext):
     try:
         chat_id = int(message.text.strip())
     except ValueError:
-        await message.answer("❌ Invalid. Send numeric ID like -1001234567890")
+        await message.answer("❌ Invalid ID. Send number like -1001234567890")
         return
     
     async with session() as s:
         q = select(Channel).where(Channel.chat_id == chat_id)
         res = await s.execute(q)
         if res.scalars().first():
-            await message.answer("⚠️ Channel already added")
+            await message.answer("⚠️ Already added")
             await state.clear()
             return
     
     await state.update_data(chat_id=chat_id)
-    kb = types.ReplyKeyboardMarkup(
-        keyboard=[[types.KeyboardButton(text="🔙 Cancel")]],
-        resize_keyboard=True
-    )
     await message.answer(
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"Chat ID: {chat_id}\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"Now send the CHANNEL TITLE/NAME:",
-        reply_markup=kb
+        f"Chat ID: {chat_id} ✅\n\n"
+        f"Now send TITLE:",
+        reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="❌ Cancel")]],
+            resize_keyboard=True
+        )
     )
     await state.set_state(ChannelState.title)
 
 
-@router.message(ChannelState.title, F.text == "🔙 Cancel")
+@router.message(ChannelState.title, F.text == "❌ Cancel")
 async def cancel_title(message: types.Message, state: FSMContext):
-    """Cancel at title."""
+    """Cancel title."""
     await state.clear()
     await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
 
 
 @router.message(ChannelState.title, F.text)
 async def get_title(message: types.Message, state: FSMContext):
-    """Get title and add channel."""
+    """Get title and show categories."""
+    title = message.text.strip()
+    await state.update_data(title=title)
+    
+    async with session() as s:
+        q = select(Category)
+        res = await s.execute(q)
+        categories = res.scalars().all()
+    
+    if not categories:
+        # Skip categories
+        await state.update_data(selected_categories=[])
+        await ask_welcome_message(message, state)
+        return
+    
+    # Show categories
+    kb = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(
+                text=f"☐ {cat.name}",
+                callback_data=f"cat_{cat.id}"
+            )]
+            for cat in categories
+        ] + [
+            [types.InlineKeyboardButton(text="✅ Next", callback_data="cat_next")],
+            [types.InlineKeyboardButton(text="⏭️ Skip", callback_data="cat_skip")]
+        ]
+    )
+    
+    await message.answer(
+        f"Title: {title} ✅\n\n"
+        f"📁 SELECT CATEGORIES:\n\n"
+        f"(Optional - tap to select)",
+        reply_markup=kb
+    )
+    await state.update_data(selected_categories=[])
+    await state.set_state(ChannelState.select_categories)
+
+
+@router.callback_query(ChannelState.select_categories)
+async def handle_categories(query: types.CallbackQuery, state: FSMContext):
+    """Handle category selection."""
+    if query.data == "cat_skip" or query.data == "cat_next":
+        await ask_welcome_message_callback(query, state)
+        await query.answer()
+        return
+    
+    # Toggle category
+    cat_id = int(query.data.replace("cat_", ""))
+    data = await state.get_data()
+    selected = data.get("selected_categories", [])
+    
+    if cat_id in selected:
+        selected.remove(cat_id)
+    else:
+        selected.append(cat_id)
+    
+    await state.update_data(selected_categories=selected)
+    
+    async with session() as s:
+        q = select(Category)
+        res = await s.execute(q)
+        categories = res.scalars().all()
+    
+    kb = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(
+                text=f"{'☑' if cat.id in selected else '☐'} {cat.name}",
+                callback_data=f"cat_{cat.id}"
+            )]
+            for cat in categories
+        ] + [
+            [types.InlineKeyboardButton(text="✅ Next", callback_data="cat_next")],
+            [types.InlineKeyboardButton(text="⏭️ Skip", callback_data="cat_skip")]
+        ]
+    )
+    
+    await query.message.edit_reply_markup(reply_markup=kb)
+    await query.answer()
+
+
+async def ask_welcome_message(message: types.Message, state: FSMContext):
+    """Ask for welcome message."""
+    await message.answer(
+        "💬 WELCOME MESSAGE:\n\n"
+        "Send a message to send to new\n"
+        "subscribers (or tap Skip):",
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [types.InlineKeyboardButton(text="⏭️ Skip", callback_data="wel_skip")],
+                [types.InlineKeyboardButton(text="❌ Cancel", callback_data="wel_cancel")]
+            ]
+        )
+    )
+    await state.set_state(ChannelState.welcome_msg)
+
+
+async def ask_welcome_message_callback(query: types.CallbackQuery, state: FSMContext):
+    """Ask for welcome message from callback."""
+    await query.message.answer(
+        "💬 WELCOME MESSAGE:\n\n"
+        "Send message for new subscribers\n"
+        "(or tap Skip):",
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [types.InlineKeyboardButton(text="⏭️ Skip", callback_data="wel_skip")],
+                [types.InlineKeyboardButton(text="❌ Cancel", callback_data="wel_cancel")]
+            ]
+        )
+    )
+    await state.set_state(ChannelState.welcome_msg)
+
+
+@router.callback_query(ChannelState.welcome_msg)
+async def handle_welcome(query: types.CallbackQuery, state: FSMContext):
+    """Handle welcome message."""
+    if query.data == "wel_cancel":
+        await state.clear()
+        await query.message.answer("❌ Cancelled")
+        await query.answer()
+        return
+    
+    if query.data == "wel_skip":
+        await state.update_data(welcome_message=None)
+        await finalize_channel(query.message, state)
+        await query.answer()
+        return
+
+
+@router.message(ChannelState.welcome_msg)
+async def get_welcome_msg(message: types.Message, state: FSMContext):
+    """Get welcome message."""
+    if message.text == "⏭️ Skip" or message.text == "❌ Cancel":
+        if message.text == "❌ Cancel":
+            await state.clear()
+            await message.answer("❌ Cancelled")
+            return
+        await state.update_data(welcome_message=None)
+    else:
+        await state.update_data(welcome_message=message.text.strip())
+    
+    await finalize_channel(message, state)
+
+
+async def finalize_channel(message: types.Message, state: FSMContext):
+    """Add channel to database."""
     data = await state.get_data()
     chat_id = data.get("chat_id")
-    title = message.text.strip()
+    title = data.get("title")
+    selected_cats = data.get("selected_categories", [])
+    welcome_msg = data.get("welcome_message")
     
     async with session() as s:
         ch = Channel(
             owner_user_id=message.from_user.id,
             chat_id=chat_id,
-            title=title
+            title=title,
+            welcome_message=welcome_msg
         )
         s.add(ch)
+        await s.flush()
+        
+        # Link categories
+        if selected_cats:
+            q = select(Category).where(Category.id.in_(selected_cats))
+            res = await s.execute(q)
+            cats = res.scalars().all()
+            for cat in cats:
+                ch.categories.append(cat)
+        
         await s.commit()
+    
+    cat_count = len(selected_cats)
+    cat_text = f"📁 Categories: {cat_count}" if cat_count > 0 else "❌ No categories"
     
     await message.answer(
         f"✅ CHANNEL ADDED!\n\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"ID: {ch.id}\n"
         f"Title: {title}\n"
-        f"Chat ID: {chat_id}\n"
+        f"{cat_text}\n"
+        f"Welcome Msg: {'✅' if welcome_msg else '❌'}\n"
         f"━━━━━━━━━━━━━━━━━━",
         reply_markup=types.ReplyKeyboardRemove()
     )
@@ -123,19 +283,21 @@ async def list_channels(message: types.Message):
             "━━━━━━━━━━━━━━━━━━\n"
             "📍 CHANNELS\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
-            "❌ No channels added\n\n"
-            "Use /add_channel to add one"
+            "❌ No channels\n\n"
+            "Use /add_channel"
         )
         return
     
     text = "━━━━━━━━━━━━━━━━━━\n📍 CHANNELS\n━━━━━━━━━━━━━━━━━━\n\n"
     
     for ch in channels:
+        cats = ", ".join([c.name for c in ch.categories]) if ch.categories else "None"
         text += (
             f"ID: {ch.id}\n"
             f"Title: {ch.title}\n"
             f"Chat ID: {ch.chat_id}\n"
-            f"Auto-Approve: {'✅ ON' if ch.auto_approve_members else '❌ OFF'}\n\n"
+            f"Categories: {cats}\n"
+            f"Auto-Approve: {'✅' if ch.auto_approve_members else '❌'}\n\n"
         )
     
     await message.answer(text)
@@ -143,33 +305,27 @@ async def list_channels(message: types.Message):
 
 @router.message(Command("delete_channel"))
 async def delete_channel_start(message: types.Message, state: FSMContext):
-    """Start delete channel."""
+    """Start delete."""
     await state.clear()
-    kb = types.ReplyKeyboardMarkup(
-        keyboard=[[types.KeyboardButton(text="🔙 Cancel")]],
-        resize_keyboard=True
-    )
     await message.answer(
-        "━━━━━━━━━━━━━━━━━━\n"
-        "🗑️ DELETE CHANNEL\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "Send the Channel ID to delete\n\n"
-        "(Use /list_channels to see IDs):",
-        reply_markup=kb
+        "🗑️ DELETE CHANNEL\n\n"
+        "Send Channel ID:",
+        reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="❌ Cancel")]],
+            resize_keyboard=True
+        )
     )
     await state.set_state(ChannelState.delete_id)
 
 
-@router.message(ChannelState.delete_id, F.text == "🔙 Cancel")
-async def cancel_delete(message: types.Message, state: FSMContext):
-    """Cancel delete."""
-    await state.clear()
-    await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
-
-
-@router.message(ChannelState.delete_id, F.text)
-async def confirm_delete(message: types.Message, state: FSMContext):
+@router.message(ChannelState.delete_id)
+async def delete_confirm(message: types.Message, state: FSMContext):
     """Delete channel."""
+    if message.text == "❌ Cancel":
+        await state.clear()
+        await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
+        return
+    
     try:
         ch_id = int(message.text.strip())
     except ValueError:
@@ -179,7 +335,7 @@ async def confirm_delete(message: types.Message, state: FSMContext):
     async with session() as s:
         ch = await s.get(Channel, ch_id)
         if not ch:
-            await message.answer("❌ Channel not found")
+            await message.answer("❌ Not found")
             await state.clear()
             return
         
@@ -189,9 +345,7 @@ async def confirm_delete(message: types.Message, state: FSMContext):
     
     await message.answer(
         f"✅ DELETED!\n\n"
-        f"━━━━━━━━━━━━\n"
-        f"Channel: {title}\n"
-        f"━━━━━━━━━━━━",
+        f"{title}",
         reply_markup=types.ReplyKeyboardRemove()
     )
     await state.clear()

@@ -22,16 +22,16 @@ async def main_menu(message: types.Message):
     )
     
     await message.answer(
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "👋 HELPBOT - CROSSPOST ADMIN\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Welcome! Choose what you want to do:\n\n"
-        "📨 MESSAGING - Post/Edit/Delete messages\n"
-        "📍 CHANNELS - Manage your channels\n"
-        "📁 CATEGORIES - Organize with categories\n"
-        "⚙️ SETTINGS - Auto-approve & more\n"
-        "📊 ANALYTICS - View statistics\n"
-        "❓ HELP - Command reference",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Welcome! Choose what to do:\n\n"
+        "📨 MESSAGING - Post/Edit/Delete\n"
+        "📍 CHANNELS - Manage channels\n"
+        "📁 CATEGORIES - Organize channels\n"
+        "⚙️ SETTINGS - Auto-approve\n"
+        "📊 ANALYTICS - View stats\n"
+        "❓ HELP - All commands",
         reply_markup=kb
     )
 
@@ -41,27 +41,25 @@ async def messaging_menu(message: types.Message):
     """Messaging submenu."""
     kb = types.ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="✏️ Compose Post")],
+            [types.KeyboardButton(text="✏️ Compose & Post")],
+            [types.KeyboardButton(text="📨 Post to Category")],
             [types.KeyboardButton(text="📋 View My Posts")],
             [types.KeyboardButton(text="✎️ Edit Post")],
             [types.KeyboardButton(text="🗑️ Delete Post")],
-            [types.KeyboardButton(text="⏰ Schedule Post")],
-            [types.KeyboardButton(text="🔗 Link Replacer")],
             [types.KeyboardButton(text="🔙 Back")],
         ],
         resize_keyboard=True
     )
     
     await message.answer(
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "📨 MESSAGING MENU\n"
-        "━━━━━━━━━━━━━━━━━━━\n\n"
-        "✏️ Compose - Create new post\n"
-        "📋 View Posts - See what you posted\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📨 MESSAGING\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "✏️ Compose - Send to channels\n"
+        "📨 Category - Post to all in category\n"
+        "📋 View - See your posts\n"
         "✎️ Edit - Change post text\n"
-        "🗑️ Delete - Remove post\n"
-        "⏰ Schedule - Post later\n"
-        "🔗 Link - Replace URLs",
+        "🗑️ Delete - Remove post",
         reply_markup=kb
     )
 
@@ -80,12 +78,12 @@ async def channels_menu(message: types.Message):
     )
     
     await message.answer(
-        "━━━━━━━━━━━━━━━━━━━\n"
-        "📍 CHANNELS MENU\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "➕ Add - Add new channel\n"
-        "📋 List - View all channels\n"
-        "🗑️ Delete - Remove channel",
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "📍 CHANNELS\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "➕ Add - Add channel\n"
+        "📋 List - View all\n"
+        "🗑️ Delete - Remove",
         reply_markup=kb
     )
 
@@ -103,11 +101,14 @@ async def categories_menu(message: types.Message):
     )
     
     await message.answer(
-        "━━━━━━━━━━━━━━━━━━\n"
-        "📁 CATEGORIES MENU\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "📁 CATEGORIES\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Categories help organize channels.\n\n"
         "➕ Add - Create category\n"
-        "📋 List - View categories",
+        "📋 List - View categories\n\n"
+        "Then assign channels to categories\n"
+        "when adding them.",
         reply_markup=kb
     )
 
@@ -124,24 +125,24 @@ async def settings_menu(message: types.Message):
     )
     
     await message.answer(
-        "━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
         "⚙️ SETTINGS\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "🔐 Auto-Approve - Auto-approve join requests",
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🔐 Auto-Approve - Approve join requests",
         reply_markup=kb
     )
 
 
 @router.message(lambda msg: msg.text == "📊 ANALYTICS")
 async def analytics_view(message: types.Message):
-    """Analytics view - redirect to analytics handler."""
+    """Analytics view."""
     from handlers.analytics import show_analytics
     await show_analytics(message)
 
 
 @router.message(Command("help"))
 async def help_cmd(message: types.Message):
-    """Help command - show all commands."""
+    """Help command."""
     kb = types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(text="🔙 Back")],
@@ -150,28 +151,27 @@ async def help_cmd(message: types.Message):
     )
     
     help_text = (
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📖 COMMAND REFERENCE\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📖 ALL COMMANDS\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "📨 MESSAGING:\n"
-        "/compose - Create & post message\n"
+        "/compose - Post to channels\n"
+        "/post_category - Post to category\n"
         "/myposts - View your posts\n"
-        "/edit - Edit post text\n"
-        "/delete - Delete post\n"
-        "/schedule - Schedule a post\n"
-        "/replacer - Replace links\n\n"
+        "/edit - Edit post\n"
+        "/delete - Delete post\n\n"
         "📍 CHANNELS:\n"
         "/add_channel - Add channel\n"
         "/list_channels - View channels\n"
-        "/delete_channel - Remove channel\n\n"
+        "/delete_channel - Remove\n\n"
         "📁 CATEGORIES:\n"
-        "/add_category - Create category\n"
-        "/list_categories - View categories\n\n"
+        "/add_category - Create\n"
+        "/list_categories - View\n\n"
         "⚙️ SETTINGS:\n"
-        "/autoapprove - Toggle auto-approval\n\n"
+        "/autoapprove - Auto-approve\n\n"
         "📊 ANALYTICS:\n"
-        "/analytics - View statistics\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        "/analytics - Stats\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
     
     await message.answer(help_text, reply_markup=kb)

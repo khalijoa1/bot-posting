@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, String, Table, UniqueConstraint, func, Boolean
+from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, String, Table, UniqueConstraint, func, Boolean, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db import Base
@@ -35,6 +35,7 @@ class Channel(Base):
     chat_id: Mapped[int] = mapped_column(Integer, unique=True)
     title: Mapped[str] = mapped_column(String(255))
     auto_approve_members: Mapped[bool] = mapped_column(Boolean, default=False)
+    welcome_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     targets: Mapped[list["PostTarget"]] = relationship(back_populates="channel")
@@ -74,8 +75,7 @@ class Post(Base):
 
 
 class PostTarget(Base):
-    """One row per (post, channel) - carries the per-channel message_id once sent,
-    which is what makes editing a multi-channel post possible afterward."""
+    """One row per (post, channel) - carries the per-channel message_id once sent."""
 
     __tablename__ = "post_targets"
 
@@ -90,7 +90,7 @@ class PostTarget(Base):
 
 
 class SourceChannel(Base):
-    """A public channel (not owned by the operator) that the userbot watches for new posts."""
+    """A public channel that the userbot watches for new posts."""
 
     __tablename__ = "source_channels"
 
