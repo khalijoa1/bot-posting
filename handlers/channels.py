@@ -92,7 +92,7 @@ async def get_title(message: types.Message, state: FSMContext):
         categories = res.scalars().all()
     
     if not categories:
-        # Skip categories
+        # Skip categories - go to welcome message
         await state.update_data(selected_categories=[])
         await ask_welcome_message(message, state)
         return
@@ -125,7 +125,7 @@ async def get_title(message: types.Message, state: FSMContext):
 async def handle_categories(query: types.CallbackQuery, state: FSMContext):
     """Handle category selection."""
     if query.data == "cat_skip" or query.data == "cat_next":
-        await ask_welcome_message_callback(query, state)
+        await ask_welcome_message(query.message, state)
         await query.answer()
         return
     
@@ -165,64 +165,42 @@ async def handle_categories(query: types.CallbackQuery, state: FSMContext):
 
 async def ask_welcome_message(message: types.Message, state: FSMContext):
     """Ask for welcome message."""
+    kb = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="⏭️ Skip")],
+            [types.KeyboardButton(text="❌ Cancel")]
+        ],
+        resize_keyboard=True
+    )
+    
     await message.answer(
         "💬 WELCOME MESSAGE:\n\n"
-        "Send a message to send to new\n"
-        "subscribers (or tap Skip):",
-        reply_markup=types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [types.InlineKeyboardButton(text="⏭️ Skip", callback_data="wel_skip")],
-                [types.InlineKeyboardButton(text="❌ Cancel", callback_data="wel_cancel")]
-            ]
-        )
+        "Send a message for new subscribers:\n\n"
+        "(or tap Skip)",
+        reply_markup=kb
     )
     await state.set_state(ChannelState.welcome_msg)
 
 
-async def ask_welcome_message_callback(query: types.CallbackQuery, state: FSMContext):
-    """Ask for welcome message from callback."""
-    await query.message.answer(
-        "💬 WELCOME MESSAGE:\n\n"
-        "Send message for new subscribers\n"
-        "(or tap Skip):",
-        reply_markup=types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [types.InlineKeyboardButton(text="⏭️ Skip", callback_data="wel_skip")],
-                [types.InlineKeyboardButton(text="❌ Cancel", callback_data="wel_cancel")]
-            ]
-        )
-    )
-    await state.set_state(ChannelState.welcome_msg)
+@router.message(ChannelState.welcome_msg, F.text == "⏭️ Skip")
+async def skip_welcome(message: types.Message, state: FSMContext):
+    """Skip welcome message."""
+    await state.update_data(welcome_message=None)
+    await finalize_channel(message, state)
 
 
-@router.callback_query(ChannelState.welcome_msg)
-async def handle_welcome(query: types.CallbackQuery, state: FSMContext):
-    """Handle welcome message."""
-    if query.data == "wel_cancel":
-        await state.clear()
-        await query.message.answer("❌ Cancelled")
-        await query.answer()
-        return
-    
-    if query.data == "wel_skip":
-        await state.update_data(welcome_message=None)
-        await finalize_channel(query.message, state)
-        await query.answer()
-        return
+@router.message(ChannelState.welcome_msg, F.text == "❌ Cancel")
+async def cancel_welcome(message: types.Message, state: FSMContext):
+    """Cancel adding channel."""
+    await state.clear()
+    await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
 
 
-@router.message(ChannelState.welcome_msg)
+@router.message(ChannelState.welcome_msg, F.text)
 async def get_welcome_msg(message: types.Message, state: FSMContext):
     """Get welcome message."""
-    if message.text == "⏭️ Skip" or message.text == "❌ Cancel":
-        if message.text == "❌ Cancel":
-            await state.clear()
-            await message.answer("❌ Cancelled")
-            return
-        await state.update_data(welcome_message=None)
-    else:
-        await state.update_data(welcome_message=message.text.strip())
-    
+    welcome_msg = message.text.strip()
+    await state.update_data(welcome_message=welcome_msg)
     await finalize_channel(message, state)
 
 
@@ -244,7 +222,7 @@ async def finalize_channel(message: types.Message, state: FSMContext):
         s.add(ch)
         await s.flush()
         
-        # Link categories
+        # Link categories - avoid lazy loading
         if selected_cats:
             q = select(Category).where(Category.id.in_(selected_cats))
             res = await s.execute(q)
@@ -253,6 +231,7 @@ async def finalize_channel(message: types.Message, state: FSMContext):
                 ch.categories.append(cat)
         
         await s.commit()
+        ch_id = ch.id
     
     cat_count = len(selected_cats)
     cat_text = f"📁 Categories: {cat_count}" if cat_count > 0 else "❌ No categories"
@@ -260,7 +239,7 @@ async def finalize_channel(message: types.Message, state: FSMContext):
     await message.answer(
         f"✅ CHANNEL ADDED!\n\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"ID: {ch.id}\n"
+        f"ID: {ch_id}\n"
         f"Title: {title}\n"
         f"{cat_text}\n"
         f"Welcome Msg: {'✅' if welcome_msg else '❌'}\n"
@@ -291,13 +270,19 @@ async def list_channels(message: types.Message):
     text = "━━━━━━━━━━━━━━━━━━\n📍 CHANNELS\n━━━━━━━━━━━━━━━━━━\n\n"
     
     for ch in channels:
-        cats = ", ".join([c.name for c in ch.categories]) if ch.categories else "None"
+        # Get fresh data to avoid lazy loading
+        async with session() as s:
+            fresh_ch = await s.get(Channel, ch.id)
+            cat_names = [c.name for c in fresh_ch.categories] if fresh_ch.categories else []
+        
+        cats = ", ".join(cat_names) if cat_names else "None"
         text += (
             f"ID: {ch.id}\n"
             f"Title: {ch.title}\n"
             f"Chat ID: {ch.chat_id}\n"
             f"Categories: {cats}\n"
-            f"Auto-Approve: {'✅' if ch.auto_approve_members else '❌'}\n\n"
+            f"Auto-Approve: {'✅' if ch.auto_approve_members else '❌'}\n"
+            f"Welcome: {'✅' if ch.welcome_message else '❌'}\n\n"
         )
     
     await message.answer(text)

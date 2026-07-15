@@ -8,7 +8,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import get_settings
 from db import init_db
-from handlers import menu, compose, posts, channels, categories, analytics, settings, category_post
+from handlers import menu, compose, category_post, posts, channels, categories, analytics, settings, replacer
 from middleware import AllowlistMiddleware
 
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +30,7 @@ async def main() -> None:
     dp.include_router(posts.router)
     dp.include_router(channels.router)
     dp.include_router(categories.router)
+    dp.include_router(replacer.router)
     dp.include_router(analytics.router)
     dp.include_router(settings.router)
 
