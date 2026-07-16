@@ -429,7 +429,7 @@ async def post_scheduled(state: FSMContext, user_id: int, answer) -> None:
     await state.clear()
 
 
-@router.message(lambda msg: msg.text == "✏️ Compose Post")
+@router.message(lambda msg: msg.text == "✏️ Compose & Post")
 async def compose_button(message: types.Message, state: FSMContext):
     """Compose from menu."""
     await compose_start(message, state)
