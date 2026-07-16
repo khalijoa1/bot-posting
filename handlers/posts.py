@@ -6,7 +6,7 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 
 from db import session
-from models import Post, PostTarget
+from models import Post, PostStatus, PostTarget
 
 router = Router()
 
@@ -16,6 +16,10 @@ class EditState(StatesGroup):
     new_text = State()
 
 
+class DeleteState(StatesGroup):
+    post_id = State()
+
+
 @router.message(Command("myposts"))
 async def list_posts(message: types.Message):
     """List all user's posts."""
@@ -23,7 +27,7 @@ async def list_posts(message: types.Message):
         q = select(Post).where(Post.owner_user_id == message.from_user.id)
         res = await s.execute(q)
         posts = res.scalars().all()
-    
+
     if not posts:
         await message.answer(
             "━━━━━━━━━━━━━━━━━\n"
@@ -33,15 +37,15 @@ async def list_posts(message: types.Message):
             "Use /compose to create a post"
         )
         return
-    
+
     text = "━━━━━━━━━━━━━━━━━\n📋 MY POSTS\n━━━━━━━━━━━━━━━━━\n\n"
-    
+
     for p in posts:
         async with session() as s:
             tq = select(PostTarget).where(PostTarget.post_id == p.id)
             tres = await s.execute(tq)
             targets = tres.scalars().all()
-        
+
         preview = (p.text or "")[:60]
         text += (
             f"━━━━━━━━━━━━━━━━━\n"
@@ -50,7 +54,7 @@ async def list_posts(message: types.Message):
             f"Channels: {len(targets)}\n"
             f"Status: {p.status.value}\n\n"
         )
-    
+
     await message.answer(text)
 
 
@@ -88,21 +92,21 @@ async def get_post_id(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Invalid ID. Send a number")
         return
-    
+
     async with session() as s:
         post = await s.get(Post, post_id)
         if not post or post.owner_user_id != message.from_user.id:
             await message.answer("❌ Post not found or not yours")
             return
-        
+
         tq = select(PostTarget).where(PostTarget.post_id == post_id)
         tres = await s.execute(tq)
         targets = tres.scalars().all()
-    
+
     if not targets:
         await message.answer("❌ No active messages for this post")
         return
-    
+
     await state.update_data(post_id=post_id)
     kb = types.ReplyKeyboardMarkup(
         keyboard=[[types.KeyboardButton(text="🔙 Cancel")]],
@@ -134,16 +138,16 @@ async def apply_edit(message: types.Message, state: FSMContext):
     post_id = data.get("post_id")
     new_text = message.text.strip()
     bot = message.bot
-    
+
     async with session() as s:
         post = await s.get(Post, post_id)
         post.text = new_text
         s.add(post)
-        
+
         tq = select(PostTarget).where(PostTarget.post_id == post_id)
         tres = await s.execute(tq)
         targets = tres.scalars().all()
-        
+
         success = 0
         failed = []
         for target in targets:
@@ -154,28 +158,30 @@ async def apply_edit(message: types.Message, state: FSMContext):
                     text=new_text
                 )
                 success += 1
-            except Exception as e:
+            except Exception:
                 failed.append(target.channel.title)
-        
+
         await s.commit()
-    
+
     result = (
         f"✅ EDITED!\n\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"Channels: {success}/{len(targets)}\n"
         f"━━━━━━━━━━━━━━━━━━"
     )
-    
+
     if failed:
         result += f"\n\n❌ Failed:\n" + "\n".join([f"  • {c}" for c in failed])
-    
+
     await message.answer(result, reply_markup=types.ReplyKeyboardRemove())
     await state.clear()
 
 
 @router.message(Command("delete"))
 async def delete_start(message: types.Message, state: FSMContext):
-    """Start delete workflow."""
+    """Start delete workflow. Uses its own state - previously this reused
+    EditState.post_id, which meant /delete silently fell into the edit flow
+    and asked for replacement text instead of ever deleting anything."""
     await state.clear()
     kb = types.ReplyKeyboardMarkup(
         keyboard=[[types.KeyboardButton(text="🔙 Cancel")]],
@@ -189,7 +195,58 @@ async def delete_start(message: types.Message, state: FSMContext):
         "(Use /myposts to see IDs):",
         reply_markup=kb
     )
-    await state.set_state(EditState.post_id)
+    await state.set_state(DeleteState.post_id)
+
+
+@router.message(DeleteState.post_id, F.text == "🔙 Cancel")
+async def cancel_delete(message: types.Message, state: FSMContext):
+    """Cancel delete."""
+    await state.clear()
+    await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
+
+
+@router.message(DeleteState.post_id, F.text)
+async def confirm_delete(message: types.Message, state: FSMContext):
+    """Delete the post's messages from every channel and mark it deleted."""
+    try:
+        post_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Invalid ID. Send a number")
+        return
+
+    bot = message.bot
+
+    async with session() as s:
+        post = await s.get(Post, post_id)
+        if not post or post.owner_user_id != message.from_user.id:
+            await message.answer("❌ Post not found or not yours")
+            await state.clear()
+            return
+
+        tq = select(PostTarget).where(PostTarget.post_id == post_id)
+        tres = await s.execute(tq)
+        targets = tres.scalars().all()
+
+        success = 0
+        failed = []
+        for target in targets:
+            if target.message_id is not None:
+                try:
+                    await bot.delete_message(chat_id=target.channel.chat_id, message_id=target.message_id)
+                    success += 1
+                except Exception:
+                    failed.append(target.channel.title)
+            await s.delete(target)
+
+        post.status = PostStatus.DELETED
+        await s.commit()
+
+    result = f"✅ DELETED from {success} channel(s)"
+    if failed:
+        result += f"\n\n❌ Failed:\n" + "\n".join([f"  • {c}" for c in failed])
+
+    await message.answer(result, reply_markup=types.ReplyKeyboardRemove())
+    await state.clear()
 
 
 @router.message(lambda msg: msg.text == "📋 View My Posts")
@@ -208,4 +265,3 @@ async def edit_button(message: types.Message, state: FSMContext):
 async def delete_button(message: types.Message, state: FSMContext):
     """Delete from menu."""
     await delete_start(message, state)
-

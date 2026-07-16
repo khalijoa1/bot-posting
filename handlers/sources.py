@@ -1,5 +1,6 @@
+"""Manage source channels watched by the Telethon userbot for reposting."""
 from aiogram import Router, types
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from sqlalchemy import select
 
 from db import session
@@ -9,10 +10,10 @@ router = Router()
 
 
 @router.message(Command("add_source"))
-async def add_source(message: types.Message):
+async def add_source(message: types.Message, command: CommandObject):
     """Usage: /add_source <identifier> [title]
 identifier can be @username or numeric chat id"""
-    args = message.get_args()
+    args = command.args
     if not args:
         await message.reply("Usage: /add_source <identifier> [title]")
         return
@@ -20,13 +21,16 @@ identifier can be @username or numeric chat id"""
     identifier = parts[0].strip()
     title = parts[1].strip() if len(parts) > 1 else None
     async with session() as s:
-        # check exists
         q = select(SourceChannel).where(SourceChannel.identifier == identifier)
         res = await s.execute(q)
         if res.scalars().first():
             await message.reply("Source already exists")
             return
-        sc = SourceChannel(owner_user_id=message.from_user.id if message.from_user else 0, identifier=identifier, title=title)
+        sc = SourceChannel(
+            owner_user_id=message.from_user.id if message.from_user else 0,
+            identifier=identifier,
+            title=title,
+        )
         s.add(sc)
         await s.commit()
         await message.reply(f"Added source {identifier} title={title}")
@@ -46,14 +50,13 @@ async def list_sources(message: types.Message):
 
 
 @router.message(Command("remove_source"))
-async def remove_source(message: types.Message):
-    args = message.get_args()
+async def remove_source(message: types.Message, command: CommandObject):
+    args = command.args
     if not args:
         await message.reply("Usage: /remove_source <identifier_or_id>")
         return
     key = args.strip()
     async with session() as s:
-        # try id
         try:
             val = int(key)
             q = select(SourceChannel).where(SourceChannel.id == val)
