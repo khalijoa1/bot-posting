@@ -13,6 +13,7 @@ async def main_menu(message: types.Message):
             [types.KeyboardButton(text="📨 MESSAGING")],
             [types.KeyboardButton(text="📍 CHANNELS")],
             [types.KeyboardButton(text="📁 CATEGORIES")],
+            [types.KeyboardButton(text="🛡️ MODERATION")],
             [types.KeyboardButton(text="⚙️ SETTINGS")],
             [types.KeyboardButton(text="📊 ANALYTICS")],
             [types.KeyboardButton(text="❓ HELP")],
@@ -20,7 +21,7 @@ async def main_menu(message: types.Message):
         resize_keyboard=True,
         one_time_keyboard=False
     )
-    
+
     await message.answer(
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "👋 HELPBOT - CROSSPOST ADMIN\n"
@@ -29,6 +30,7 @@ async def main_menu(message: types.Message):
         "📨 MESSAGING - Post/Edit/Delete\n"
         "📍 CHANNELS - Manage channels\n"
         "📁 CATEGORIES - Organize channels\n"
+        "🛡️ MODERATION - Keep groups clean\n"
         "⚙️ SETTINGS - Auto-approve\n"
         "📊 ANALYTICS - View stats\n"
         "❓ HELP - All commands",
@@ -51,7 +53,7 @@ async def messaging_menu(message: types.Message):
         ],
         resize_keyboard=True
     )
-    
+
     await message.answer(
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "📨 MESSAGING\n"
@@ -78,7 +80,7 @@ async def channels_menu(message: types.Message):
         ],
         resize_keyboard=True
     )
-    
+
     await message.answer(
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "📍 CHANNELS\n"
@@ -101,7 +103,7 @@ async def categories_menu(message: types.Message):
         ],
         resize_keyboard=True
     )
-    
+
     await message.answer(
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "📁 CATEGORIES\n"
@@ -111,6 +113,37 @@ async def categories_menu(message: types.Message):
         "📋 List - View categories\n\n"
         "Then assign channels to categories\n"
         "when adding them.",
+        reply_markup=kb
+    )
+
+
+@router.message(lambda msg: msg.text == "🛡️ MODERATION")
+async def moderation_menu(message: types.Message):
+    """Moderation submenu - keep groups clean and friendly."""
+    kb = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="🛡️ Moderation")],
+            [types.KeyboardButton(text="🔙 Back")],
+        ],
+        resize_keyboard=True
+    )
+
+    await message.answer(
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "🛡️ MODERATION\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Auto-delete spam links and keep\n"
+        "your groups friendly.\n\n"
+        "Setup (one-time, per group):\n"
+        "1. Add this bot as admin in the\n"
+        "   group with Delete messages +\n"
+        "   Ban users permissions.\n"
+        "2. /add_group <chat_id> [title]\n"
+        "3. Tap 🛡️ Moderation below to\n"
+        "   choose link & spam rules.\n\n"
+        "Other commands:\n"
+        "/list_groups - see registered groups\n"
+        "/remove_group <id> - stop moderating",
         reply_markup=kb
     )
 
@@ -125,7 +158,7 @@ async def settings_menu(message: types.Message):
         ],
         resize_keyboard=True
     )
-    
+
     await message.answer(
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "⚙️ SETTINGS\n"
@@ -151,7 +184,7 @@ async def help_cmd(message: types.Message):
         ],
         resize_keyboard=True
     )
-    
+
     help_text = (
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "📖 ALL COMMANDS\n"
@@ -170,13 +203,18 @@ async def help_cmd(message: types.Message):
         "📁 CATEGORIES:\n"
         "/add_category - Create\n"
         "/list_categories - View\n\n"
+        "🛡️ MODERATION:\n"
+        "/add_group - Register a group\n"
+        "/moderation - Configure rules\n"
+        "/list_groups - View groups\n"
+        "/remove_group - Stop moderating\n\n"
         "⚙️ SETTINGS:\n"
         "/autoapprove - Auto-approve\n\n"
         "📊 ANALYTICS:\n"
         "/analytics - Stats\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
-    
+
     await message.answer(help_text, reply_markup=kb)
 
 
@@ -190,4 +228,3 @@ async def help_menu(message: types.Message):
 async def go_back(message: types.Message):
     """Go back to main menu."""
     await main_menu(message)
-
