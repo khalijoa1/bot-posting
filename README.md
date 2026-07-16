@@ -22,8 +22,8 @@ A single-operator Telegram bot to compose posts, send them to multiple channels 
 ## Registering a channel
 
 1. Add your bot as an **admin** of the Telegram channel (needs "Post messages" and "Edit messages" permissions; also grant "Add users"/approve-join-requests permission if you plan to use auto-approve).
-2. Forward any message from that channel to the bot in a private chat.
-3. The bot confirms registration. Repeat for each channel.
+2. Get the channel's numeric chat id (looks like `-1001234567890`) — e.g. by temporarily adding a utility bot like [@RawDataBot](https://t.me/RawDataBot) to the channel, or checking Telegram Desktop's channel info.
+3. In a private chat with your bot, send `/add_channel`, then the chat id, then a title when prompted. Repeat for each channel.
 
 ## Usage
 
@@ -49,6 +49,20 @@ The bot can also watch public Telegram channels you don't administer and automat
 5. `/list_sources`, `/remove_source`, `/list_rules`, `/remove_rule` — manage the above.
 
 If `TELETHON_API_ID`/`TELETHON_API_HASH` aren't set, this feature is simply skipped and the rest of the bot works normally.
+
+### Group moderation
+
+The bot can also keep a Telegram **group** (not channel) clean by automatically deleting spam links and handling flooders — configurable per group.
+
+1. Add the bot to the group as an **admin** with "Delete messages" and "Ban users" permissions.
+2. Get the group's chat id (same trick as channels above — e.g. via [@RawDataBot](https://t.me/RawDataBot)).
+3. In a private chat with the bot: `/add_group <chat_id> [title]`.
+4. `/moderation` — pick the group, then choose:
+   - **Links**: delete all links, delete only invite links/ad links, or allow admins but delete for everyone else.
+   - **Spam**: delete the message only, delete + warn then mute repeat offenders, or delete + kick immediately.
+5. `/list_groups`, `/remove_group <id>` — manage registered groups.
+
+Spam detection covers message flooding (too many messages too fast) and repeated duplicate messages. Once a group is registered, every member's plain messages there are checked — no per-message setup needed. Commands and the bot's private menus still only work for the operator, even inside a moderated group.
 
 ## Notes / limitations (MVP)
 

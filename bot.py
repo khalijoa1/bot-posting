@@ -21,6 +21,7 @@ from handlers import (
     sources,
     repost_rules,
     join_requests,
+    moderation,
 )
 from middleware import AllowlistMiddleware
 from services.scheduler import run_scheduler_loop, run_post_send_loop
@@ -51,6 +52,11 @@ async def main() -> None:
     dp.include_router(sources.router)
     dp.include_router(repost_rules.router)
     dp.include_router(join_requests.router)
+    # moderation.router has a broad "any group message" catch-all handler,
+    # so it must be included LAST - otherwise it would swallow messages
+    # (including the operator's own commands sent inside a group) before
+    # the more specific routers above get a chance to handle them.
+    dp.include_router(moderation.router)
 
     # Background jobs: auto-delete of sent posts, sending of due scheduled posts,
     # and the optional Telethon userbot that watches source channels for reposting.

@@ -120,3 +120,33 @@ class RepostRule(Base):
     source: Mapped["SourceChannel"] = relationship(back_populates="rules")
     destination: Mapped["Channel"] = relationship()
 
+
+class LinkPolicy(str, enum.Enum):
+    DELETE_ALL = "delete_all"
+    DELETE_INVITES_ADS = "delete_invites_ads"
+    ADMINS_ONLY = "admins_only"
+
+
+class SpamAction(str, enum.Enum):
+    DELETE_ONLY = "delete_only"
+    WARN_MUTE = "warn_mute"
+    DELETE_KICK = "delete_kick"
+
+
+class ModeratedGroup(Base):
+    """A group/supergroup the operator has opted into automatic moderation for."""
+
+    __tablename__ = "moderated_groups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(Integer, index=True)
+    chat_id: Mapped[int] = mapped_column(Integer, unique=True)
+    title: Mapped[str] = mapped_column(String(255))
+    moderation_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    link_policy: Mapped[LinkPolicy] = mapped_column(
+        Enum(LinkPolicy, name="link_policy"), default=LinkPolicy.DELETE_INVITES_ADS
+    )
+    spam_action: Mapped[SpamAction] = mapped_column(
+        Enum(SpamAction, name="spam_action"), default=SpamAction.WARN_MUTE
+    )
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
