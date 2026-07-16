@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     telethon_api_hash: str = ""
     telethon_phone: str = ""
     telethon_session_name: str = "userbot"
+    # Preferred for production (e.g. Railway): a portable session produced by
+    # scripts/telethon_login.py, stored as an env var instead of a session file.
+    telethon_session_string: str = ""
 
     @property
     def allowed_user_id_set(self) -> set[int]:

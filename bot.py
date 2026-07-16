@@ -8,8 +8,23 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import get_settings
 from db import init_db
-from handlers import menu, compose, category_post, posts, channels, categories, analytics, settings, replacer
+from handlers import (
+    menu,
+    compose,
+    category_post,
+    posts,
+    channels,
+    categories,
+    analytics,
+    settings,
+    replacer,
+    sources,
+    repost_rules,
+    join_requests,
+)
 from middleware import AllowlistMiddleware
+from services.scheduler import run_scheduler_loop, run_post_send_loop
+from services.telethon_client import run_userbot
 
 logging.basicConfig(level=logging.INFO)
 
@@ -22,7 +37,7 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
 
     dp.update.outer_middleware(AllowlistMiddleware())
-    
+
     # Include all handlers in proper order
     dp.include_router(menu.router)
     dp.include_router(compose.router)
@@ -33,6 +48,15 @@ async def main() -> None:
     dp.include_router(replacer.router)
     dp.include_router(analytics.router)
     dp.include_router(settings.router)
+    dp.include_router(sources.router)
+    dp.include_router(repost_rules.router)
+    dp.include_router(join_requests.router)
+
+    # Background jobs: auto-delete of sent posts, sending of due scheduled posts,
+    # and the optional Telethon userbot that watches source channels for reposting.
+    asyncio.create_task(run_scheduler_loop(bot))
+    asyncio.create_task(run_post_send_loop(bot))
+    asyncio.create_task(run_userbot(bot))
 
     try:
         await dp.start_polling(bot)
@@ -42,4 +66,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
