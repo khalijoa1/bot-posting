@@ -1,4 +1,4 @@
-# Telegram Multi-Channel Auto-Poster Bot 
+# Telegram Multi-Channel Auto-Poster Bot
 
 A single-operator Telegram bot to compose posts, send them to multiple channels at once, schedule them for later, and edit them after they're sent.
 
@@ -21,12 +21,16 @@ A single-operator Telegram bot to compose posts, send them to multiple channels 
 
 ## Registering a channel
 
+**Easiest way — just add the bot as admin.** The moment the bot is promoted to admin in a channel, it registers itself automatically and DMs you (the operator) so you can optionally tag it with categories. No need to look up or type the numeric chat id.
+
 1. Add your bot as an **admin** of the Telegram channel (needs "Post messages" and "Edit messages" permissions; also grant "Add users"/approve-join-requests permission if you plan to use auto-approve).
-2. Get the channel's numeric chat id (looks like `-1001234567890`) — e.g. by temporarily adding a utility bot like [@RawDataBot](https://t.me/RawDataBot) to the channel, or checking Telegram Desktop's channel info.
-3. In a private chat with your bot, send `/add_channel`, then the chat id, then a title when prompted. Repeat for each channel.
+2. That's it — check the DM the bot sends you, or run `/list_channels` to confirm.
+
+If auto-detection doesn't fire for some reason (e.g. the bot was added by someone other than an operator listed in `ALLOWED_USER_IDS`), you can still register manually: in a private chat with the bot, send `/add_channel`, then the chat id (looks like `-1001234567890`, findable via a utility bot like [@RawDataBot](https://t.me/RawDataBot)), then a title when prompted.
 
 ## Usage
 
+- `/cancel` — universal escape hatch. Works from inside any flow (composing, adding a channel, replacing links, etc.) and returns you straight to the main menu. `/start` also always works and resets you to the main menu.
 - `/compose` — send text, pick which registered channels to send it to (toggle individual channels), choose **Post Now** or **Schedule Later** (relative delay in minutes), then choose an **auto-delete** duration (`30 min` / `2 hours` / `1 day` / custom like `45m`, `3h`, `2d` / `no`). The auto-delete timer starts when the post is actually sent, not when it's composed.
 - `/post_category` — pick a category and send text to every channel in it, with the same auto-delete choice as `/compose`.
 - `/myposts` — list your posts and their status (draft/scheduled/sent).
@@ -54,13 +58,15 @@ If `TELETHON_API_ID`/`TELETHON_API_HASH` aren't set, this feature is simply skip
 
 The bot can also keep a Telegram **group** (not channel) clean by automatically deleting spam links and handling flooders — configurable per group.
 
+**Easiest way — just add the bot as admin.** The moment it's promoted to admin in a group, it registers itself for moderation automatically (with sensible defaults) and DMs you a "Configure" button. No need to look up or type the chat id.
+
 1. Add the bot to the group as an **admin** with "Delete messages" and "Ban users" permissions.
-2. Get the group's chat id (same trick as channels above — e.g. via [@RawDataBot](https://t.me/RawDataBot)).
-3. In a private chat with the bot: `/add_group <chat_id> [title]`.
-4. `/moderation` — pick the group, then choose:
+2. Tap **Configure** in the DM it sends you, or run `/moderation` any time, then choose:
    - **Links**: delete all links, delete only invite links/ad links, or allow admins but delete for everyone else.
    - **Spam**: delete the message only, delete + warn then mute repeat offenders, or delete + kick immediately.
-5. `/list_groups`, `/remove_group <id>` — manage registered groups.
+3. `/list_groups`, `/remove_group <id>` — manage registered groups.
+
+If auto-detection doesn't fire, `/add_group <chat_id> [title]` still works as a manual fallback.
 
 Spam detection covers message flooding (too many messages too fast) and repeated duplicate messages. Once a group is registered, every member's plain messages there are checked — no per-message setup needed. Commands and the bot's private menus still only work for the operator, even inside a moderated group.
 
