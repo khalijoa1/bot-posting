@@ -70,7 +70,13 @@ async def run_post_send_loop(bot: Bot) -> None:
                                 msg = await bot.send_photo(
                                     chat_id=target.channel.chat_id,
                                     photo=post.photo_file_id,
-                                    caption=post.text,
+                                    caption=post.text or None,
+                                )
+                            elif post.content_type == ContentType.VIDEO and post.video_file_id:
+                                msg = await bot.send_video(
+                                    chat_id=target.channel.chat_id,
+                                    video=post.video_file_id,
+                                    caption=post.text or None,
                                 )
                             else:
                                 msg = await bot.send_message(chat_id=target.channel.chat_id, text=post.text or "")
