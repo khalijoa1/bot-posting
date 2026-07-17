@@ -3,27 +3,50 @@ and app-wide navigation (the persistent main-menu keyboard)."""
 from aiogram import types
 
 
-def main_menu_kb() -> types.ReplyKeyboardMarkup:
-    """The persistent main-menu keyboard.
+def main_menu_kb() -> types.InlineKeyboardMarkup:
+    """The main-menu inline keyboard.
 
     Every flow (compose, add channel, add category, link replacer, etc.)
-    should restore this keyboard when it finishes or is cancelled, instead
-    of removing the keyboard or leaving a stale sub-menu keyboard behind.
+    should attach this when it finishes or is cancelled, instead of
+    removing the keyboard or leaving a stale sub-menu keyboard behind.
     Previously many flows did the latter, which left the user with no way
     back except typing /start again.
+
+    This used to be a persistent ReplyKeyboardMarkup (a tall stack of
+    buttons pinned under the text box). It's now an inline keyboard
+    attached directly to each menu message instead: tapping a button edits
+    that same message in place rather than sending a new one, which is
+    faster to navigate and keeps the chat from filling up with one throwaway
+    keyboard message per tap.
     """
-    return types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="📨 MESSAGING")],
-            [types.KeyboardButton(text="📍 CHANNELS")],
-            [types.KeyboardButton(text="📁 CATEGORIES")],
-            [types.KeyboardButton(text="🛡️ MODERATION")],
-            [types.KeyboardButton(text="⚙️ SETTINGS")],
-            [types.KeyboardButton(text="📊 ANALYTICS")],
-            [types.KeyboardButton(text="❓ HELP")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=False
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(text="📨 Messaging", callback_data="menu:messaging"),
+                types.InlineKeyboardButton(text="📍 Channels", callback_data="menu:channels"),
+            ],
+            [
+                types.InlineKeyboardButton(text="📁 Categories", callback_data="menu:categories"),
+                types.InlineKeyboardButton(text="🛡️ Moderation", callback_data="menu:moderation"),
+            ],
+            [
+                types.InlineKeyboardButton(text="⚙️ Settings", callback_data="menu:settings"),
+                types.InlineKeyboardButton(text="📊 Analytics", callback_data="menu:analytics"),
+            ],
+            [types.InlineKeyboardButton(text="❓ Help", callback_data="menu:help")],
+        ]
+    )
+
+
+def nav_kb(rows: list[list[tuple[str, str]]]) -> types.InlineKeyboardMarkup:
+    """Build an inline keyboard from rows of (label, callback_data) pairs.
+    Small helper so submenu keyboards in menu.py stay short and readable.
+    """
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(text=label, callback_data=data) for label, data in row]
+            for row in rows
+        ]
     )
 
 
