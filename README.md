@@ -38,8 +38,8 @@ If auto-detection doesn't fire for some reason (e.g. the bot was added by someon
 - `/delete` — pick a post and delete its messages from every channel it was sent to.
 - `/replacer` — bulk find-and-replace a link across all/a range/a single one of your posts.
 - `/channels`, `/add_channel`, `/list_channels`, `/delete_channel` — manage channels.
-- `/add_category`, `/list_categories` — group channels into categories; assign a channel to categories while adding it.
-- `/autoapprove` — toggle auto-approval of subscriber join requests, per channel. Requires the channel to have "Approve new members" turned on in Telegram and the bot to be an admin there.
+- `/add_category`, `/list_categories` — group channels into categories; assign a channel to categories while adding it. Use `/assign_categories` to (re)assign an already-registered channel to categories at any time.
+- `/autoapprove` — toggle auto-approval of subscriber join requests, per channel, and set/edit the welcome message DMed to a subscriber the moment they're auto-approved (tap 💬 next to a channel). Requires the channel to have "Approve new members" turned on in Telegram and the bot to be an admin there. Telegram only allows the bot to DM someone who has opened a chat with it before (e.g. pressed /start), so if a subscriber never has, the welcome DM silently fails to send - not something the bot can work around.
 - `/analytics` — post counts, delivery counts, channel counts.
 
 ### Optional: repost from a source channel
