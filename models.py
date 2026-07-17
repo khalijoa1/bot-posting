@@ -47,6 +47,7 @@ class Channel(Base):
 class ContentType(str, enum.Enum):
     TEXT = "text"
     PHOTO = "photo"
+    VIDEO = "video"
 
 
 class PostStatus(str, enum.Enum):
@@ -65,6 +66,7 @@ class Post(Base):
     content_type: Mapped[ContentType] = mapped_column(Enum(ContentType, name="content_type"))
     text: Mapped[str | None] = mapped_column(String(4096), nullable=True)
     photo_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    video_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[PostStatus] = mapped_column(Enum(PostStatus, name="post_status"), default=PostStatus.DRAFT)
     scheduled_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     auto_delete_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
