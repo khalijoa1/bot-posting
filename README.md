@@ -1,4 +1,4 @@
-# Telegram Multi-Channel Auto-Poster Bot
+# Telegram Multi-Channel Auto-Poster Bot 
 
 A single-operator Telegram bot to compose posts, send them to multiple channels at once, schedule them for later, and edit them after they're sent.
 
