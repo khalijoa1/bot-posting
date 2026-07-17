@@ -6,6 +6,7 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 
 from db import session
+from handlers.common import main_menu_kb
 from models import Category
 
 router = Router()
@@ -37,18 +38,18 @@ async def add_category_start(message: types.Message, state: FSMContext):
 async def cancel_category(message: types.Message, state: FSMContext):
     """Cancel adding category."""
     await state.clear()
-    await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
 
 
 @router.message(CategoryState.name, F.text)
 async def get_category_name(message: types.Message, state: FSMContext):
     """Get category name and add it."""
     name = message.text.strip()
-    
+
     if len(name) < 1:
         await message.answer("❌ Name cannot be empty")
         return
-    
+
     async with session() as s:
         cat = Category(
             owner_user_id=message.from_user.id,
@@ -56,14 +57,15 @@ async def get_category_name(message: types.Message, state: FSMContext):
         )
         s.add(cat)
         await s.commit()
-    
+        cat_id = cat.id
+
     await message.answer(
         f"✅ CATEGORY CREATED!\n\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"ID: {cat.id}\n"
+        f"ID: {cat_id}\n"
         f"Name: {name}\n"
         f"━━━━━━━━━━━━━━━━",
-        reply_markup=types.ReplyKeyboardRemove()
+        reply_markup=main_menu_kb()
     )
     await state.clear()
 
@@ -75,7 +77,7 @@ async def list_categories(message: types.Message):
         q = select(Category)
         res = await s.execute(q)
         categories = res.scalars().all()
-    
+
     if not categories:
         await message.answer(
             "━━━━━━━━━━━━━━━━━━\n"
@@ -85,12 +87,12 @@ async def list_categories(message: types.Message):
             "Use /add_category to create one"
         )
         return
-    
+
     text = "━━━━━━━━━━━━━━━━━━\n📁 CATEGORIES\n━━━━━━━━━━━━━━━━━━\n\n"
-    
+
     for cat in categories:
         text += f"ID: {cat.id}\nName: {cat.name}\n\n"
-    
+
     await message.answer(text)
 
 
@@ -104,4 +106,3 @@ async def add_button(message: types.Message, state: FSMContext):
 async def list_button(message: types.Message):
     """List categories from menu."""
     await list_categories(message)
-

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 
 from db import session
-from handlers.common import auto_delete_kb, parse_duration
+from handlers.common import auto_delete_kb, main_menu_kb, parse_duration
 from models import Channel, ContentType, Post, PostStatus, PostTarget
 
 router = Router()
@@ -47,15 +47,7 @@ async def compose_start(message: types.Message, state: FSMContext):
 async def cancel_compose(message: types.Message, state: FSMContext):
     """Cancel at text stage."""
     await state.clear()
-    await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
-    kb = types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="📨 MESSAGING")],
-            [types.KeyboardButton(text="🔙 Back")],
-        ],
-        resize_keyboard=True
-    )
-    await message.answer("Choose action:", reply_markup=kb)
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
 
 
 @router.message(ComposeState.text, F.text)
@@ -77,8 +69,9 @@ async def get_message_text(message: types.Message, state: FSMContext):
     if not channels:
         await message.answer(
             "❌ No channels added\n\n"
-            "Use /add_channel first",
-            reply_markup=types.ReplyKeyboardRemove()
+            "Add the bot as admin to a channel to register it automatically, "
+            "or use /add_channel",
+            reply_markup=main_menu_kb()
         )
         await state.clear()
         return
@@ -112,7 +105,7 @@ async def handle_channels(query: types.CallbackQuery, state: FSMContext):
     """Handle channel toggling."""
     if query.data == "ch_cancel":
         await state.clear()
-        await query.message.answer("❌ Cancelled")
+        await query.message.answer("❌ Cancelled", reply_markup=main_menu_kb())
         await query.answer()
         return
 
@@ -178,7 +171,7 @@ async def handle_schedule(query: types.CallbackQuery, state: FSMContext):
     """Handle scheduling choice."""
     if query.data == "sched_cancel":
         await state.clear()
-        await query.message.answer("❌ Cancelled")
+        await query.message.answer("❌ Cancelled", reply_markup=main_menu_kb())
         await query.answer()
         return
 
@@ -213,7 +206,7 @@ async def handle_schedule_time(query: types.CallbackQuery, state: FSMContext):
     """Handle schedule time selection from the preset buttons."""
     if query.data == "time_cancel":
         await state.clear()
-        await query.message.answer("❌ Cancelled")
+        await query.message.answer("❌ Cancelled", reply_markup=main_menu_kb())
         await query.answer()
         return
 
@@ -241,7 +234,7 @@ async def handle_schedule_time(query: types.CallbackQuery, state: FSMContext):
 async def cancel_custom_schedule(message: types.Message, state: FSMContext):
     """Cancel while typing a custom delay."""
     await state.clear()
-    await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
 
 
 @router.message(ComposeState.schedule_time, F.text)
@@ -278,7 +271,7 @@ async def handle_auto_delete(query: types.CallbackQuery, state: FSMContext):
 
     if choice == "cancel":
         await state.clear()
-        await query.message.answer("❌ Cancelled")
+        await query.message.answer("❌ Cancelled", reply_markup=main_menu_kb())
         await query.answer()
         return
 
@@ -305,7 +298,7 @@ async def handle_auto_delete(query: types.CallbackQuery, state: FSMContext):
 async def cancel_auto_delete(message: types.Message, state: FSMContext):
     """Cancel while typing a custom auto-delete duration."""
     await state.clear()
-    await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
 
 
 @router.message(ComposeState.auto_delete, F.text)
@@ -318,7 +311,7 @@ async def handle_custom_auto_delete(message: types.Message, state: FSMContext):
         return
 
     await state.update_data(auto_delete_seconds=seconds)
-    await message.answer("✅ Got it...", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("✅ Got it...")
 
     data = await state.get_data()
     if data.get("scheduled_time"):
@@ -376,7 +369,7 @@ async def post_now(state: FSMContext, bot, user_id: int, answer) -> None:
     if failed:
         result += f"\n\n❌ Failed:\n" + "\n".join(failed)
 
-    await answer(result)
+    await answer(result, reply_markup=main_menu_kb())
     await state.clear()
 
 
@@ -425,7 +418,7 @@ async def post_scheduled(state: FSMContext, user_id: int, answer) -> None:
         f"━━━━━━━━━━━━━━━"
     )
 
-    await answer(result)
+    await answer(result, reply_markup=main_menu_kb())
     await state.clear()
 
 

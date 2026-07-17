@@ -1,26 +1,24 @@
 """Main menu and navigation."""
 from aiogram import Router, types
 from aiogram.filters import CommandStart, Command
+from aiogram.fsm.context import FSMContext
+
+from handlers.common import main_menu_kb
 
 router = Router()
 
 
 @router.message(CommandStart())
-async def main_menu(message: types.Message):
-    """Main menu with organized navigation."""
-    kb = types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="📨 MESSAGING")],
-            [types.KeyboardButton(text="📍 CHANNELS")],
-            [types.KeyboardButton(text="📁 CATEGORIES")],
-            [types.KeyboardButton(text="🛡️ MODERATION")],
-            [types.KeyboardButton(text="⚙️ SETTINGS")],
-            [types.KeyboardButton(text="📊 ANALYTICS")],
-            [types.KeyboardButton(text="❓ HELP")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=False
-    )
+async def main_menu(message: types.Message, state: FSMContext):
+    """Main menu with organized navigation.
+
+    Also clears any in-progress flow's FSM state. Previously /start didn't
+    touch state, so if someone was stuck mid-flow (e.g. composing a post)
+    and typed /start to escape, the bot still thought they were mid-flow
+    and their next tap could get swallowed by the old flow's handler.
+    """
+    await state.clear()
+    kb = main_menu_kb()
 
     await message.answer(
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -33,7 +31,9 @@ async def main_menu(message: types.Message):
         "🛡️ MODERATION - Keep groups clean\n"
         "⚙️ SETTINGS - Auto-approve\n"
         "📊 ANALYTICS - View stats\n"
-        "❓ HELP - All commands",
+        "❓ HELP - All commands\n\n"
+        "💡 Stuck in the middle of something? Send /cancel any time to "
+        "back out and return here.",
         reply_markup=kb
     )
 
@@ -138,12 +138,12 @@ async def moderation_menu(message: types.Message):
         "1. Add this bot as admin in the\n"
         "   group with Delete messages +\n"
         "   Ban users permissions.\n"
-        "2. /add_group <chat_id> [title]\n"
+        "2. /add_group CHAT_ID [title]\n"
         "3. Tap 🛡️ Moderation below to\n"
         "   choose link & spam rules.\n\n"
         "Other commands:\n"
         "/list_groups - see registered groups\n"
-        "/remove_group <id> - stop moderating",
+        "/remove_group ID - stop moderating",
         reply_markup=kb
     )
 
@@ -225,6 +225,20 @@ async def help_menu(message: types.Message):
 
 
 @router.message(lambda msg: msg.text == "🔙 Back")
-async def go_back(message: types.Message):
+async def go_back(message: types.Message, state: FSMContext):
     """Go back to main menu."""
-    await main_menu(message)
+    await main_menu(message, state)
+
+
+@router.message(Command("cancel"))
+async def cancel_any(message: types.Message, state: FSMContext):
+    """Universal escape hatch.
+
+    Works no matter what flow (or sub-menu) the user is currently in -
+    clears any in-progress FSM state and drops them back at the main menu.
+    This is the fix for "some areas I can't go back, I must press /start
+    again": now /cancel (or /start) always works from anywhere.
+    """
+    await state.clear()
+    await message.answer("↩️ Cancelled. Back to the main menu:")
+    await main_menu(message, state)

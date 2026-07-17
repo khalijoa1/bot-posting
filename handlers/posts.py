@@ -6,6 +6,7 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 
 from db import session
+from handlers.common import main_menu_kb
 from models import Post, PostStatus, PostTarget
 
 router = Router()
@@ -81,7 +82,7 @@ async def edit_start(message: types.Message, state: FSMContext):
 async def cancel_edit(message: types.Message, state: FSMContext):
     """Cancel edit."""
     await state.clear()
-    await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
 
 
 @router.message(EditState.post_id, F.text)
@@ -128,7 +129,7 @@ async def get_post_id(message: types.Message, state: FSMContext):
 async def cancel_edit_text(message: types.Message, state: FSMContext):
     """Cancel edit text."""
     await state.clear()
-    await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
 
 
 @router.message(EditState.new_text, F.text)
@@ -173,7 +174,7 @@ async def apply_edit(message: types.Message, state: FSMContext):
     if failed:
         result += f"\n\n❌ Failed:\n" + "\n".join([f"  • {c}" for c in failed])
 
-    await message.answer(result, reply_markup=types.ReplyKeyboardRemove())
+    await message.answer(result, reply_markup=main_menu_kb())
     await state.clear()
 
 
@@ -202,7 +203,7 @@ async def delete_start(message: types.Message, state: FSMContext):
 async def cancel_delete(message: types.Message, state: FSMContext):
     """Cancel delete."""
     await state.clear()
-    await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
 
 
 @router.message(DeleteState.post_id, F.text)
@@ -219,7 +220,7 @@ async def confirm_delete(message: types.Message, state: FSMContext):
     async with session() as s:
         post = await s.get(Post, post_id)
         if not post or post.owner_user_id != message.from_user.id:
-            await message.answer("❌ Post not found or not yours")
+            await message.answer("❌ Post not found or not yours", reply_markup=main_menu_kb())
             await state.clear()
             return
 
@@ -245,7 +246,7 @@ async def confirm_delete(message: types.Message, state: FSMContext):
     if failed:
         result += f"\n\n❌ Failed:\n" + "\n".join([f"  • {c}" for c in failed])
 
-    await message.answer(result, reply_markup=types.ReplyKeyboardRemove())
+    await message.answer(result, reply_markup=main_menu_kb())
     await state.clear()
 
 

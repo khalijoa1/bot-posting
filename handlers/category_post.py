@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 
 from db import session
-from handlers.common import auto_delete_kb, parse_duration
+from handlers.common import auto_delete_kb, main_menu_kb, parse_duration
 from models import Category, ContentType, Post, PostStatus, PostTarget
 
 router = Router()
@@ -60,7 +60,7 @@ async def handle_category_select(query: types.CallbackQuery, state: FSMContext):
     """Handle category selection."""
     if query.data == "postcat_cancel":
         await state.clear()
-        await query.message.answer("❌ Cancelled")
+        await query.message.answer("❌ Cancelled", reply_markup=main_menu_kb())
         await query.answer()
         return
 
@@ -93,7 +93,7 @@ async def handle_category_text(message: types.Message, state: FSMContext):
     """Capture the message text, then ask about auto-delete."""
     if message.text == "❌ Cancel":
         await state.clear()
-        await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
+        await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
         return
 
     await state.update_data(text=message.text.strip())
@@ -113,7 +113,7 @@ async def handle_category_auto_delete(query: types.CallbackQuery, state: FSMCont
 
     if choice == "cancel":
         await state.clear()
-        await query.message.answer("❌ Cancelled")
+        await query.message.answer("❌ Cancelled", reply_markup=main_menu_kb())
         await query.answer()
         return
 
@@ -137,7 +137,7 @@ async def handle_category_auto_delete(query: types.CallbackQuery, state: FSMCont
 async def cancel_category_auto_delete(message: types.Message, state: FSMContext):
     """Cancel while typing a custom auto-delete duration."""
     await state.clear()
-    await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
 
 
 @router.message(CategoryPostState.auto_delete, F.text)
@@ -213,7 +213,7 @@ async def do_category_post(state: FSMContext, user_id: int, answer, auto_delete_
     if failed:
         result += f"\n\n❌ Failed:\n" + "\n".join(failed)
 
-    await answer(result, reply_markup=types.ReplyKeyboardRemove())
+    await answer(result, reply_markup=main_menu_kb())
     await state.clear()
 
 

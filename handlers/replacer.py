@@ -6,6 +6,7 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 
 from db import session
+from handlers.common import main_menu_kb
 from models import Post
 
 router = Router()
@@ -22,7 +23,7 @@ class ReplacerState(StatesGroup):
 async def replacer_start(message: types.Message, state: FSMContext):
     """Start link replacer."""
     await state.clear()
-    
+
     kb = types.InlineKeyboardMarkup(
         inline_keyboard=[
             [types.InlineKeyboardButton(text="🔄 All Posts", callback_data="repl_all")],
@@ -31,7 +32,7 @@ async def replacer_start(message: types.Message, state: FSMContext):
             [types.InlineKeyboardButton(text="❌ Cancel", callback_data="repl_cancel")]
         ]
     )
-    
+
     await message.answer(
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🔗 LINK REPLACER\n"
@@ -50,13 +51,13 @@ async def handle_mode(query: types.CallbackQuery, state: FSMContext):
     """Handle replacement mode."""
     if query.data == "repl_cancel":
         await state.clear()
-        await query.message.answer("❌ Cancelled")
+        await query.message.answer("❌ Cancelled", reply_markup=main_menu_kb())
         await query.answer()
         return
-    
+
     mode = query.data.replace("repl_", "")
     await state.update_data(mode=mode)
-    
+
     if mode == "all":
         await state.update_data(post_ids="all")
         await ask_old_link(query.message, state)
@@ -83,7 +84,7 @@ async def handle_mode(query: types.CallbackQuery, state: FSMContext):
             )
         )
         await state.set_state(ReplacerState.post_range)
-    
+
     await query.answer()
 
 
@@ -92,29 +93,29 @@ async def handle_range(message: types.Message, state: FSMContext):
     """Handle post range input."""
     if message.text == "❌ Cancel":
         await state.clear()
-        await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
+        await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
         return
-    
+
     data = await state.get_data()
     mode = data.get("mode")
-    
+
     if mode == "range":
         try:
             parts = message.text.split("-")
             start = int(parts[0].strip())
             end = int(parts[1].strip())
             await state.update_data(post_range=(start, end))
-        except:
+        except Exception:
             await message.answer("❌ Invalid format. Use: 1-5")
             return
     else:  # single
         try:
             post_id = int(message.text.strip())
             await state.update_data(post_ids=[post_id])
-        except:
+        except Exception:
             await message.answer("❌ Invalid ID")
             return
-    
+
     await ask_old_link(message, state)
 
 
@@ -136,12 +137,12 @@ async def handle_old_link(message: types.Message, state: FSMContext):
     """Handle old link."""
     if message.text == "❌ Cancel":
         await state.clear()
-        await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
+        await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
         return
-    
+
     old_link = message.text.strip()
     await state.update_data(old_link=old_link)
-    
+
     await message.answer(
         "Send the NEW LINK:\n\n"
         "Example: https://new-url.com",
@@ -158,14 +159,14 @@ async def handle_new_link(message: types.Message, state: FSMContext):
     """Process replacement."""
     if message.text == "❌ Cancel":
         await state.clear()
-        await message.answer("❌ Cancelled", reply_markup=types.ReplyKeyboardRemove())
+        await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
         return
-    
+
     data = await state.get_data()
     mode = data.get("mode")
     old_link = data.get("old_link")
     new_link = message.text.strip()
-    
+
     async with session() as s:
         if mode == "all":
             q = select(Post).where(Post.owner_user_id == message.from_user.id)
@@ -188,16 +189,16 @@ async def handle_new_link(message: types.Message, state: FSMContext):
             )
             res = await s.execute(q)
             posts = res.scalars().all()
-        
+
         updated = 0
         for post in posts:
             if old_link in (post.text or ""):
                 post.text = (post.text or "").replace(old_link, new_link)
                 s.add(post)
                 updated += 1
-        
+
         await s.commit()
-    
+
     result = (
         f"✅ REPLACEMENT COMPLETE!\n\n"
         f"━━━━━━━━━━━━━━━━━\n"
@@ -206,8 +207,8 @@ async def handle_new_link(message: types.Message, state: FSMContext):
         f"New: {new_link[:30]}...\n"
         f"━━━━━━━━━━━━━━━━━"
     )
-    
-    await message.answer(result, reply_markup=types.ReplyKeyboardRemove())
+
+    await message.answer(result, reply_markup=main_menu_kb())
     await state.clear()
 
 
@@ -215,4 +216,3 @@ async def handle_new_link(message: types.Message, state: FSMContext):
 async def replacer_button(message: types.Message, state: FSMContext):
     """Link replacer from menu."""
     await replacer_start(message, state)
-

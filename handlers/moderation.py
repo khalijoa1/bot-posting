@@ -2,9 +2,13 @@
 
 Setup (operator only, in private chat with the bot):
   1. Add the bot to your group as an admin with "Delete messages" and
-     "Ban users" permissions.
-  2. /add_group <chat_id> [title] to register it.
-  3. /moderation to choose link and spam-handling rules for that group.
+     "Ban users" permissions - it registers itself automatically as soon
+     as it becomes admin (see group_admin_added below).
+  2. /moderation to choose link and spam-handling rules for that group.
+
+/add_group <chat_id> [title] is still available as a manual fallback if
+auto-detection doesn't fire (e.g. the bot was added by someone other than
+an approved operator).
 
 Once registered, every member's plain messages in that group are checked
 against the group's rules and acted on automatically.
@@ -16,13 +20,70 @@ import time
 from collections import defaultdict, deque
 
 from aiogram import Router, types, F
+from aiogram.enums import ChatMemberStatus
 from aiogram.filters import Command, CommandObject
 from sqlalchemy import select
 
+from config import get_settings
 from db import session
 from models import LinkPolicy, ModeratedGroup, SpamAction
 
 router = Router()
+
+
+# ---------------------------------------------------------------------------
+# Automatic registration - triggers the moment the bot is made an admin
+# ---------------------------------------------------------------------------
+
+@router.my_chat_member(F.chat.type.in_({"group", "supergroup"}))
+async def group_admin_added(update: types.ChatMemberUpdated) -> None:
+    """Auto-register a group for moderation the moment the bot is promoted
+    to admin in it, so you don't have to look up and type its numeric
+    chat_id - just add the bot as admin with Delete messages + Ban users
+    permissions and moderation starts immediately with default settings.
+    """
+    if update.new_chat_member.status != ChatMemberStatus.ADMINISTRATOR:
+        return
+    if update.old_chat_member.status == ChatMemberStatus.ADMINISTRATOR:
+        return  # already was admin (e.g. permissions edited) - not a new add
+
+    actor = update.from_user
+    if not actor or actor.id not in get_settings().allowed_user_id_set:
+        # Someone who isn't an approved operator added the bot somewhere -
+        # ignore silently rather than auto-moderating a stranger's group.
+        return
+
+    chat = update.chat
+    async with session() as s:
+        q = select(ModeratedGroup).where(ModeratedGroup.chat_id == chat.id)
+        res = await s.execute(q)
+        if res.scalars().first():
+            return  # already registered
+
+        g = ModeratedGroup(owner_user_id=actor.id, chat_id=chat.id, title=chat.title or str(chat.id))
+        s.add(g)
+        await s.commit()
+        g_id = g.id
+
+    text = (
+        "🛡️ GROUP REGISTERED FOR MODERATION\n\n"
+        f"Title: {chat.title}\n"
+        f"ID: {g_id}\n\n"
+        "I noticed I was made admin here and started moderating it "
+        "automatically with default settings (delete invite/ad links, "
+        "warn then mute repeat spammers) - no need to run /add_group.\n\n"
+        "Double check I have Delete messages + Ban users permissions, "
+        "then tap below to customize link & spam rules:"
+    )
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(text="⚙️ Configure", callback_data=f"modg_{g_id}")
+    ]])
+    try:
+        await update.bot.send_message(actor.id, text, reply_markup=kb)
+    except Exception:
+        # Operator hasn't opened a DM with the bot yet - registration still
+        # succeeded, they'll see it in /list_groups.
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -31,12 +92,12 @@ router = Router()
 
 @router.message(Command("add_group"))
 async def add_group(message: types.Message, command: CommandObject):
-    """Usage: /add_group <chat_id> [title]"""
+    """Usage: /add_group CHAT_ID [title]"""
     args = command.args
     if not args:
         await message.reply(
-            "Usage: /add_group <chat_id> [title]\n\n"
-            "chat_id looks like -1001234567890. Add the bot to the group as "
+            "Usage: /add_group CHAT_ID [title]\n\n"
+            "CHAT_ID looks like -1001234567890. Add the bot to the group as "
             "admin first (Delete messages + Ban users permissions)."
         )
         return
@@ -78,7 +139,7 @@ async def list_groups(message: types.Message):
             "🛡️ MODERATED GROUPS\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
             "❌ No groups yet\n\n"
-            "Use /add_group <chat_id> [title] to add one"
+            "Use /add_group CHAT_ID [title] to add one"
         )
         return
 
@@ -98,7 +159,7 @@ async def list_groups(message: types.Message):
 async def remove_group(message: types.Message, command: CommandObject):
     args = command.args
     if not args:
-        await message.reply("Usage: /remove_group <id>\n\n(use /list_groups to find the id)")
+        await message.reply("Usage: /remove_group ID\n\n(use /list_groups to find the id)")
         return
     try:
         gid = int(args.strip())
@@ -171,7 +232,7 @@ async def moderation_settings(message: types.Message):
             "🛡️ MODERATION\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
             "❌ No groups registered yet.\n\n"
-            "Use /add_group <chat_id> [title] first."
+            "Use /add_group CHAT_ID [title] first."
         )
         return
 

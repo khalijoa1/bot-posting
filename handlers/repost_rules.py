@@ -22,7 +22,7 @@ Example: /add_rule @source -1001234567890 3600 From {source_title}: {original_te
     args = command.args
     if not args:
         await message.reply(
-            "Usage: /add_rule <source_identifier_or_id> <destination_chat_id_or_channel_id> "
+            "Usage: /add_rule SOURCE_ID_OR_IDENTIFIER DEST_CHAT_ID_OR_CHANNEL_ID "
             "[auto_delete_seconds] [caption_template]"
         )
         return
@@ -99,7 +99,7 @@ async def list_rules(message: types.Message):
 async def remove_rule(message: types.Message, command: CommandObject):
     args = command.args
     if not args:
-        await message.reply("Usage: /remove_rule <rule_id>")
+        await message.reply("Usage: /remove_rule RULE_ID")
         return
     try:
         rid = int(args.strip())
