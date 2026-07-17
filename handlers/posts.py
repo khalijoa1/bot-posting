@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from db import session
 from handlers.common import main_menu_kb
-from models import Post, PostStatus, PostTarget
+from models import ContentType, Post, PostStatus, PostTarget
 
 router = Router()
 
@@ -118,7 +118,7 @@ async def get_post_id(message: types.Message, state: FSMContext):
         f"Post ID: {post_id}\n"
         f"Channels: {len(targets)}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Send the NEW TEXT:\n"
+        f"Send the NEW TEXT (or new caption, if this is a photo/video post):\n"
         f"(Will update in all {len(targets)} channels)",
         reply_markup=kb
     )
@@ -153,11 +153,20 @@ async def apply_edit(message: types.Message, state: FSMContext):
         failed = []
         for target in targets:
             try:
-                await bot.edit_message_text(
-                    chat_id=target.channel.chat_id,
-                    message_id=target.message_id,
-                    text=new_text
-                )
+                if post.content_type == ContentType.TEXT:
+                    await bot.edit_message_text(
+                        chat_id=target.channel.chat_id,
+                        message_id=target.message_id,
+                        text=new_text
+                    )
+                else:
+                    # Photo/video posts don't have a "text" body - the typed
+                    # replacement becomes the new caption instead.
+                    await bot.edit_message_caption(
+                        chat_id=target.channel.chat_id,
+                        message_id=target.message_id,
+                        caption=new_text
+                    )
                 success += 1
             except Exception:
                 failed.append(target.channel.title)

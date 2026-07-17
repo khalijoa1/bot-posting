@@ -78,7 +78,7 @@ async def handle_category_select(query: types.CallbackQuery, state: FSMContext):
     await query.message.answer(
         f"📁 {cat_name}\n\n"
         f"Channels: {cat_channel_count}\n\n"
-        f"Send message text:",
+        f"Send message text, or a photo/video (with an optional caption):",
         reply_markup=types.ReplyKeyboardMarkup(
             keyboard=[[types.KeyboardButton(text="❌ Cancel")]],
             resize_keyboard=True
@@ -88,15 +88,7 @@ async def handle_category_select(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
 
 
-@router.message(CategoryPostState.message_text)
-async def handle_category_text(message: types.Message, state: FSMContext):
-    """Capture the message text, then ask about auto-delete."""
-    if message.text == "❌ Cancel":
-        await state.clear()
-        await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
-        return
-
-    await state.update_data(text=message.text.strip())
+async def _ask_category_auto_delete(message: types.Message, state: FSMContext) -> None:
     await message.answer(
         "🗑️ AUTO-DELETE?\n\n"
         "Delete this post automatically after a delay?\n"
@@ -104,6 +96,37 @@ async def handle_category_text(message: types.Message, state: FSMContext):
         reply_markup=auto_delete_kb("cad")
     )
     await state.set_state(CategoryPostState.auto_delete)
+
+
+@router.message(CategoryPostState.message_text, F.text == "❌ Cancel")
+async def cancel_category_text(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
+@router.message(CategoryPostState.message_text, F.photo)
+async def handle_category_photo(message: types.Message, state: FSMContext):
+    """Capture a photo (largest size) plus its optional caption."""
+    file_id = message.photo[-1].file_id
+    caption = (message.caption or "").strip()
+    await state.update_data(content_type="photo", photo_file_id=file_id, video_file_id=None, text=caption)
+    await _ask_category_auto_delete(message, state)
+
+
+@router.message(CategoryPostState.message_text, F.video)
+async def handle_category_video(message: types.Message, state: FSMContext):
+    """Capture a video plus its optional caption."""
+    file_id = message.video.file_id
+    caption = (message.caption or "").strip()
+    await state.update_data(content_type="video", video_file_id=file_id, photo_file_id=None, text=caption)
+    await _ask_category_auto_delete(message, state)
+
+
+@router.message(CategoryPostState.message_text, F.text)
+async def handle_category_text(message: types.Message, state: FSMContext):
+    """Capture the message text, then ask about auto-delete."""
+    await state.update_data(content_type="text", text=message.text.strip(), photo_file_id=None, video_file_id=None)
+    await _ask_category_auto_delete(message, state)
 
 
 @router.callback_query(CategoryPostState.auto_delete, F.data.startswith("cad_"))
@@ -153,12 +176,13 @@ async def handle_category_custom_auto_delete(message: types.Message, state: FSMC
 
 
 async def do_category_post(state: FSMContext, user_id: int, answer, auto_delete_seconds: int | None) -> None:
-    """Send the composed text to every channel in the chosen category."""
+    """Send the composed text/photo/video to every channel in the chosen category."""
     data = await state.get_data()
     cat_id = data.get("category_id")
     text = data.get("text")
-
-    from aiogram import Bot as _Bot  # local import avoids a circular import at module load time
+    content_type = data.get("content_type", "text")
+    photo_file_id = data.get("photo_file_id")
+    video_file_id = data.get("video_file_id")
 
     success = 0
     failed = []
@@ -171,8 +195,10 @@ async def do_category_post(state: FSMContext, user_id: int, answer, auto_delete_
 
         post = Post(
             owner_user_id=user_id,
-            content_type=ContentType.TEXT,
+            content_type=ContentType(content_type),
             text=text,
+            photo_file_id=photo_file_id,
+            video_file_id=video_file_id,
             status=PostStatus.SENT,
             auto_delete_seconds=auto_delete_seconds,
             delete_at=delete_at,
@@ -187,7 +213,12 @@ async def do_category_post(state: FSMContext, user_id: int, answer, auto_delete_
 
         for ch in channels:
             try:
-                msg = await bot.send_message(chat_id=ch.chat_id, text=text)
+                if content_type == "photo" and photo_file_id:
+                    msg = await bot.send_photo(chat_id=ch.chat_id, photo=photo_file_id, caption=text or None)
+                elif content_type == "video" and video_file_id:
+                    msg = await bot.send_video(chat_id=ch.chat_id, video=video_file_id, caption=text or None)
+                else:
+                    msg = await bot.send_message(chat_id=ch.chat_id, text=text or "")
                 target = PostTarget(
                     post_id=post.id,
                     channel_id=ch.id,

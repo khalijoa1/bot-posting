@@ -37,7 +37,7 @@ async def compose_start(message: types.Message, state: FSMContext):
         "━━━━━━━━━━━━━━━━━━\n"
         "✏️ COMPOSE MESSAGE\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        "Send the message text:",
+        "Send the message text, or a photo/video (with an optional caption):",
         reply_markup=cancel_kb()
     )
     await state.set_state(ComposeState.text)
@@ -50,17 +50,10 @@ async def cancel_compose(message: types.Message, state: FSMContext):
     await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
 
 
-@router.message(ComposeState.text, F.text)
-async def get_message_text(message: types.Message, state: FSMContext):
-    """Get message text."""
-    text = message.text.strip()
-    if len(text) < 1:
-        await message.answer("❌ Message empty. Try again:")
-        return
-
-    await state.update_data(text=text)
-
-    # Get channels
+async def _ask_channels(message: types.Message, state: FSMContext, preview: str) -> None:
+    """Show the channel-selection step. Shared by the text/photo/video entry
+    points so all three content types go through the same rest of the flow.
+    """
     async with session() as s:
         q = select(Channel)
         res = await s.execute(q)
@@ -76,7 +69,6 @@ async def get_message_text(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # Show channel selection
     kb = types.InlineKeyboardMarkup(
         inline_keyboard=[
             [types.InlineKeyboardButton(
@@ -92,12 +84,44 @@ async def get_message_text(message: types.Message, state: FSMContext):
 
     await message.answer(
         f"📍 SELECT CHANNELS:\n\n"
-        f"Message: {text[:80]}...\n\n"
+        f"{preview}\n\n"
         f"Tap channels (☐=off, ☑=on):",
         reply_markup=kb
     )
     await state.update_data(selected_channels=[])
     await state.set_state(ComposeState.select_channels)
+
+
+@router.message(ComposeState.text, F.photo)
+async def get_message_photo(message: types.Message, state: FSMContext):
+    """Capture a photo (largest size) plus its optional caption."""
+    file_id = message.photo[-1].file_id
+    caption = (message.caption or "").strip()
+    await state.update_data(content_type="photo", photo_file_id=file_id, video_file_id=None, text=caption)
+    preview = f"Photo{': ' + caption[:80] if caption else ' (no caption)'}"
+    await _ask_channels(message, state, preview)
+
+
+@router.message(ComposeState.text, F.video)
+async def get_message_video(message: types.Message, state: FSMContext):
+    """Capture a video plus its optional caption."""
+    file_id = message.video.file_id
+    caption = (message.caption or "").strip()
+    await state.update_data(content_type="video", video_file_id=file_id, photo_file_id=None, text=caption)
+    preview = f"Video{': ' + caption[:80] if caption else ' (no caption)'}"
+    await _ask_channels(message, state, preview)
+
+
+@router.message(ComposeState.text, F.text)
+async def get_message_text(message: types.Message, state: FSMContext):
+    """Get message text."""
+    text = message.text.strip()
+    if len(text) < 1:
+        await message.answer("❌ Message empty. Try again:")
+        return
+
+    await state.update_data(content_type="text", text=text, photo_file_id=None, video_file_id=None)
+    await _ask_channels(message, state, f"Message: {text[:80]}...")
 
 
 @router.callback_query(ComposeState.select_channels, F.data.startswith("ch_"))
@@ -320,10 +344,25 @@ async def handle_custom_auto_delete(message: types.Message, state: FSMContext):
         await post_now(state, message.bot, message.from_user.id, message.answer)
 
 
+async def _send_to_channel(bot, chat_id: int, content_type: str, text: str | None,
+                            photo_file_id: str | None, video_file_id: str | None):
+    """Send a post to one channel, using the right Bot API method for its
+    content type. Shared by the immediate-send and scheduled-send paths.
+    """
+    if content_type == "photo" and photo_file_id:
+        return await bot.send_photo(chat_id=chat_id, photo=photo_file_id, caption=text or None)
+    if content_type == "video" and video_file_id:
+        return await bot.send_video(chat_id=chat_id, video=video_file_id, caption=text or None)
+    return await bot.send_message(chat_id=chat_id, text=text or "")
+
+
 async def post_now(state: FSMContext, bot, user_id: int, answer) -> None:
     """Post immediately."""
     data = await state.get_data()
     text = data.get("text")
+    content_type = data.get("content_type", "text")
+    photo_file_id = data.get("photo_file_id")
+    video_file_id = data.get("video_file_id")
     selected_ids = data.get("selected_channels", [])
     auto_delete_seconds = data.get("auto_delete_seconds")
 
@@ -339,8 +378,10 @@ async def post_now(state: FSMContext, bot, user_id: int, answer) -> None:
 
         post = Post(
             owner_user_id=user_id,
-            content_type=ContentType.TEXT,
+            content_type=ContentType(content_type),
             text=text,
+            photo_file_id=photo_file_id,
+            video_file_id=video_file_id,
             status=PostStatus.SENT,
             auto_delete_seconds=auto_delete_seconds,
             delete_at=delete_at,
@@ -350,7 +391,7 @@ async def post_now(state: FSMContext, bot, user_id: int, answer) -> None:
 
         for ch in channels:
             try:
-                msg = await bot.send_message(chat_id=ch.chat_id, text=text)
+                msg = await _send_to_channel(bot, ch.chat_id, content_type, text, photo_file_id, video_file_id)
                 target = PostTarget(
                     post_id=post.id,
                     channel_id=ch.id,
@@ -382,6 +423,9 @@ async def post_scheduled(state: FSMContext, user_id: int, answer) -> None:
     """
     data = await state.get_data()
     text = data.get("text")
+    content_type = data.get("content_type", "text")
+    photo_file_id = data.get("photo_file_id")
+    video_file_id = data.get("video_file_id")
     selected_ids = data.get("selected_channels", [])
     scheduled_time = data.get("scheduled_time")
     auto_delete_seconds = data.get("auto_delete_seconds")
@@ -393,8 +437,10 @@ async def post_scheduled(state: FSMContext, user_id: int, answer) -> None:
 
         post = Post(
             owner_user_id=user_id,
-            content_type=ContentType.TEXT,
+            content_type=ContentType(content_type),
             text=text,
+            photo_file_id=photo_file_id,
+            video_file_id=video_file_id,
             status=PostStatus.SCHEDULED,
             scheduled_time=scheduled_time,
             auto_delete_seconds=auto_delete_seconds,
