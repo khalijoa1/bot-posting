@@ -20,9 +20,9 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         # One-time schema fix: the "posts" table was originally created with
         # only text/photo support, and SQLite bakes the content_type enum
-        # into a CHECK constraint at table-creation time - adding VIDEO to
-        # the Python enum doesn't update that constraint on an
-        # already-existing table, so video posts would fail to insert.
+        # into a CHECK constraint at table-creation time - adding VIDEO/ALBUM
+        # to the Python enum doesn't update that constraint on an
+        # already-existing table, so those posts would fail to insert.
         # SQLite can't ALTER a CHECK constraint in place, so this rebuilds
         # the table (rename -> recreate with the new schema -> copy every
         # existing row across -> drop the renamed-old copy) instead of
@@ -32,16 +32,23 @@ async def init_db() -> None:
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='posts'"
         )
         row = result.fetchone()
-        if row and row[0] and "video" not in row[0].lower():
+        if row and row[0] and "album" not in row[0].lower():
             await conn.exec_driver_sql("ALTER TABLE posts RENAME TO posts_old")
             await conn.run_sync(lambda sync_conn: models.Post.__table__.create(sync_conn))
             await conn.exec_driver_sql(
                 "INSERT INTO posts (id, owner_user_id, content_type, text, photo_file_id, "
-                "status, scheduled_time, auto_delete_seconds, delete_at, created_at) "
+                "video_file_id, status, scheduled_time, auto_delete_seconds, delete_at, created_at) "
                 "SELECT id, owner_user_id, content_type, text, photo_file_id, "
-                "status, scheduled_time, auto_delete_seconds, delete_at, created_at FROM posts_old"
+                "video_file_id, status, scheduled_time, auto_delete_seconds, delete_at, created_at FROM posts_old"
             )
             await conn.exec_driver_sql("DROP TABLE posts_old")
+
+        # Simple additive column: existing post_targets rows just get NULL
+        # here, which is fine (they only ever sent a single message anyway).
+        result2 = await conn.exec_driver_sql("PRAGMA table_info('post_targets')")
+        cols = [r[1] for r in result2.fetchall()]
+        if cols and "extra_message_ids" not in cols:
+            await conn.exec_driver_sql("ALTER TABLE post_targets ADD COLUMN extra_message_ids TEXT")
 
         await conn.run_sync(Base.metadata.create_all)
 

@@ -25,6 +25,7 @@ from handlers import (
 )
 from middleware import AllowlistMiddleware
 from services.scheduler import run_scheduler_loop, run_post_send_loop
+from services.stats import run_channel_stats_loop
 from services.telethon_client import run_userbot
 
 logging.basicConfig(level=logging.INFO)
@@ -59,10 +60,12 @@ async def main() -> None:
     dp.include_router(moderation.router)
 
     # Background jobs: auto-delete of sent posts, sending of due scheduled posts,
-    # and the optional Telethon userbot that watches source channels for reposting.
+    # the optional Telethon userbot that watches source channels for reposting,
+    # and periodic channel member-count snapshots for /analytics growth stats.
     asyncio.create_task(run_scheduler_loop(bot))
     asyncio.create_task(run_post_send_loop(bot))
     asyncio.create_task(run_userbot(bot))
+    asyncio.create_task(run_channel_stats_loop(bot))
 
     try:
         await dp.start_polling(bot)

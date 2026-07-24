@@ -42,12 +42,16 @@ class Channel(Base):
     categories: Mapped[list["Category"]] = relationship(
         secondary=channel_categories, back_populates="channels"
     )
+    stat_snapshots: Mapped[list["ChannelStatSnapshot"]] = relationship(
+        back_populates="channel", cascade="all, delete-orphan"
+    )
 
 
 class ContentType(str, enum.Enum):
     TEXT = "text"
     PHOTO = "photo"
     VIDEO = "video"
+    ALBUM = "album"
 
 
 class PostStatus(str, enum.Enum):
@@ -74,6 +78,29 @@ class Post(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     targets: Mapped[list["PostTarget"]] = relationship(back_populates="post", cascade="all, delete-orphan")
+    media_items: Mapped[list["PostMediaItem"]] = relationship(
+        back_populates="post", cascade="all, delete-orphan", order_by="PostMediaItem.position"
+    )
+
+
+class PostMediaItem(Base):
+    """One photo/video belonging to an ALBUM post (Telegram media group).
+
+    A single Post row still represents "one thing the user composed" - for
+    an album that's a caption plus N media items, each recorded here in
+    order so the whole set can be resent (e.g. for a scheduled post) or
+    reconstructed later.
+    """
+
+    __tablename__ = "post_media_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    post_id: Mapped[int] = mapped_column(ForeignKey("posts.id", ondelete="CASCADE"))
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    media_type: Mapped[str] = mapped_column(String(16))  # "photo" | "video"
+    file_id: Mapped[str] = mapped_column(String(255))
+
+    post: Mapped["Post"] = relationship(back_populates="media_items")
 
 
 class PostTarget(Base):
@@ -85,6 +112,11 @@ class PostTarget(Base):
     post_id: Mapped[int] = mapped_column(ForeignKey("posts.id", ondelete="CASCADE"))
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"))
     message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # For ALBUM posts, Telegram's send_media_group returns one Message per
+    # item; message_id above holds the first one and the rest (as a JSON
+    # list of ints) are kept here so auto-delete/edit can find every message
+    # that belongs to the album instead of leaving stragglers behind.
+    extra_message_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     post: Mapped["Post"] = relationship(back_populates="targets")
@@ -121,6 +153,21 @@ class RepostRule(Base):
 
     source: Mapped["SourceChannel"] = relationship(back_populates="rules")
     destination: Mapped["Channel"] = relationship()
+
+
+class ChannelStatSnapshot(Base):
+    """A point-in-time member-count reading for a registered channel, taken
+    periodically by services/stats.py so /analytics can show growth over
+    time instead of just a single current number."""
+
+    __tablename__ = "channel_stat_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    member_count: Mapped[int] = mapped_column(Integer)
+    taken_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    channel: Mapped["Channel"] = relationship(back_populates="stat_snapshots")
 
 
 class LinkPolicy(str, enum.Enum):
