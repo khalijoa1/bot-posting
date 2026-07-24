@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -26,29 +27,75 @@ def _render_template(template: str, context: dict[str, Any]) -> str:
         return template
 
 
-def _apply_replacements(caption: str | None, rule: RepostRule, dest: Channel) -> str | None:
-    """Swap the source channel's links (or any other text) for the operator's
-    own, per the mapping configured on this rule via the bot's Forwarding UI.
+# Matches http(s)/www links and bare t.me links (Telegram's own share-link
+# domain, which very often shows up without a scheme in forwarded captions).
+_LINK_RE = re.compile(r"(?:https?://|www\.)\S+|(?<!\w)t\.me/\S+", re.IGNORECASE)
+# Matches @username mentions (Telegram usernames are 5-32 chars; using a
+# slightly looser 3-32 to be safe rather than under-match).
+_MENTION_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,32}\b")
 
-    Rules created through that UI store a single rule-wide mapping under the
-    "default" key regardless of destination. Older rules created via the
-    original /add_rule + hand-edited replacements_json may instead key by
-    destination chat_id/channel id - both are honoured here, preferring
-    "default" since that's what the UI writes.
+
+def _scrub_remaining_links(text: str | None, fallback: str | None) -> str | None:
+    """Final safety pass: after any explicit replacements have run, nothing
+    that still looks like a link or an @mention is allowed to survive
+    untouched - it's swapped for the operator's own fallback link/username
+    if one is configured, otherwise removed outright. This is what
+    guarantees the source channel's own link or username can never slip
+    into a repost, even for link formats or usernames nobody explicitly
+    configured a replacement for.
     """
-    if not caption or not rule.replacements_json:
-        return caption
-    try:
-        repls = json.loads(rule.replacements_json)
-    except Exception:
-        return caption
-    if not isinstance(repls, dict):
-        return caption
-    mapping = repls.get("default") or repls.get(str(dest.chat_id)) or repls.get(str(dest.id)) or {}
+    if not text:
+        return text
+
+    def _sub(_match: re.Match) -> str:
+        return fallback if fallback else ""
+
+    text = _LINK_RE.sub(_sub, text)
+    text = _MENTION_RE.sub(_sub, text)
+    # Collapse whatever whitespace/blank lines stripping a link left behind.
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _apply_replacements(text: str | None, rule: RepostRule, dest: Channel) -> str | None:
+    """Swap the source channel's links/usernames for the operator's own.
+
+    Two layers:
+    1. Explicit "old -> new" pairs configured on the rule (via the bot's
+       Forwarding UI, or hand-edited on an older rule) - applied first,
+       exact substring match.
+    2. A mandatory scrub pass (_scrub_remaining_links) that catches every
+       link or @mention still left afterward and replaces it with the
+       rule's configured fallback link/username, or strips it if no
+       fallback is set. This always runs, even if the rule has no
+       replacements configured at all - the source's own link or username
+       must never be posted as-is, one way or another.
+
+    Rules created through the UI store the mapping under the "default" key
+    regardless of destination. Older rules created via the original
+    /add_rule + hand-edited replacements_json may instead key by
+    destination chat_id/channel id - both are honoured here.
+    """
+    if not text:
+        return text
+
+    mapping: dict[str, str] = {}
+    fallback: str | None = None
+    if rule.replacements_json:
+        try:
+            repls = json.loads(rule.replacements_json)
+        except Exception:
+            repls = {}
+        if isinstance(repls, dict):
+            mapping = repls.get("default") or repls.get(str(dest.chat_id)) or repls.get(str(dest.id)) or {}
+            fallback = repls.get("fallback")
+
     if isinstance(mapping, dict):
         for old, new in mapping.items():
-            caption = caption.replace(old, new)
-    return caption
+            text = text.replace(old, new)
+
+    return _scrub_remaining_links(text, fallback)
 
 
 async def handle_incoming_message(bot: Bot, event) -> None:
@@ -121,13 +168,20 @@ async def handle_incoming_message(bot: Bot, event) -> None:
             if not dest:
                 continue
 
+            # Scrub the source's own text FIRST, before it's dropped into a
+            # caption_template - that way an operator-authored template
+            # (e.g. their own "Join us: https://t.me/mychannel" footer)
+            # never gets clipped by the same pass that's removing the
+            # *source's* links, since it never touches that literal
+            # template text at all.
+            cleaned_text = _apply_replacements(text, rule, dest)
+
             context = {
-                "original_text": text or "",
+                "original_text": cleaned_text or "",
                 "source_title": source.title or "",
                 "source_username": source.identifier,
             }
-            caption = _render_template(rule.caption_template, context) if rule.caption_template else text
-            caption = _apply_replacements(caption, rule, dest)
+            caption = _render_template(rule.caption_template, context) if rule.caption_template else cleaned_text
 
             try:
                 if photo_bytes:
