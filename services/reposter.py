@@ -26,6 +26,31 @@ def _render_template(template: str, context: dict[str, Any]) -> str:
         return template
 
 
+def _apply_replacements(caption: str | None, rule: RepostRule, dest: Channel) -> str | None:
+    """Swap the source channel's links (or any other text) for the operator's
+    own, per the mapping configured on this rule via the bot's Forwarding UI.
+
+    Rules created through that UI store a single rule-wide mapping under the
+    "default" key regardless of destination. Older rules created via the
+    original /add_rule + hand-edited replacements_json may instead key by
+    destination chat_id/channel id - both are honoured here, preferring
+    "default" since that's what the UI writes.
+    """
+    if not caption or not rule.replacements_json:
+        return caption
+    try:
+        repls = json.loads(rule.replacements_json)
+    except Exception:
+        return caption
+    if not isinstance(repls, dict):
+        return caption
+    mapping = repls.get("default") or repls.get(str(dest.chat_id)) or repls.get(str(dest.id)) or {}
+    if isinstance(mapping, dict):
+        for old, new in mapping.items():
+            caption = caption.replace(old, new)
+    return caption
+
+
 async def handle_incoming_message(bot: Bot, event) -> None:
     """Process a Telethon NewMessage event and repost it to matching destinations.
 
@@ -60,13 +85,28 @@ async def handle_incoming_message(bot: Bot, event) -> None:
 
         text = message.message or None
         photo_bytes: bytes | None = None
+        video_bytes: bytes | None = None
         if message.photo:
             downloaded = await message.download_media(bytes)
             photo_bytes = downloaded if isinstance(downloaded, (bytes, bytearray)) else None
+        elif message.video:
+            # Previously only photos were downloaded here - a video source
+            # post fell through to the plain-text branch below with no
+            # media at all, silently dropping the video and reposting the
+            # caption alone. Videos are handled the same way as photos now.
+            downloaded = await message.download_media(bytes)
+            video_bytes = downloaded if isinstance(downloaded, (bytes, bytearray)) else None
+
+        if photo_bytes:
+            content_type = ContentType.PHOTO
+        elif video_bytes:
+            content_type = ContentType.VIDEO
+        else:
+            content_type = ContentType.TEXT
 
         post = Post(
             owner_user_id=0,  # system-owned: created by the userbot, not a specific operator chat
-            content_type=ContentType.PHOTO if photo_bytes else ContentType.TEXT,
+            content_type=content_type,
             text=text,
             status=PostStatus.SENT,
             created_at=datetime.utcnow(),
@@ -87,22 +127,19 @@ async def handle_incoming_message(bot: Bot, event) -> None:
                 "source_username": source.identifier,
             }
             caption = _render_template(rule.caption_template, context) if rule.caption_template else text
-
-            if rule.replacements_json:
-                try:
-                    repls = json.loads(rule.replacements_json)
-                except Exception:
-                    repls = {}
-                per_dest = repls.get(str(dest.chat_id)) or repls.get(str(dest.id)) or repls.get("default") or {}
-                if isinstance(per_dest, dict) and caption:
-                    for k, v in per_dest.items():
-                        caption = caption.replace(k, v)
+            caption = _apply_replacements(caption, rule, dest)
 
             try:
                 if photo_bytes:
                     sent = await bot.send_photo(
                         chat_id=dest.chat_id,
                         photo=BufferedInputFile(photo_bytes, filename="repost.jpg"),
+                        caption=caption,
+                    )
+                elif video_bytes:
+                    sent = await bot.send_video(
+                        chat_id=dest.chat_id,
+                        video=BufferedInputFile(video_bytes, filename="repost.mp4"),
                         caption=caption,
                     )
                 else:
