@@ -3,11 +3,12 @@
 Channels can be registered two ways:
   1. Automatically - add the bot as admin to the channel and it registers
      itself (see channel_admin_added below). This is the recommended way;
-     no need to look up or type the numeric chat_id.
+     no need to look up or type the numeric chat_id. Works no matter which
+     Telegram account performs the promotion - see the note on
+     channel_admin_added for why.
   2. Manually - /add_channel, for cases where auto-detection isn't possible
-     (e.g. the bot was added by someone other than an approved operator, or
-     you want to set everything - title, categories, welcome message - in
-     one guided flow up front).
+     (e.g. you want to set everything - title, categories, welcome message -
+     in one guided flow up front).
 """
 from aiogram import Router, types, F
 from aiogram.enums import ChatMemberStatus
@@ -394,17 +395,28 @@ async def channel_admin_added(update: types.ChatMemberUpdated) -> None:
     """Auto-register a channel the moment the bot is promoted to admin in
     it, so you don't have to look up and type its numeric chat_id - just
     add the bot as admin with posting permissions and it's registered.
+
+    This used to require the Telegram account that promoted the bot to be
+    one of ALLOWED_USER_IDS (the bot's own operator allowlist), and silently
+    skip registration otherwise. That broke the common case of operators
+    using a second/alt Telegram account to admin a channel their main
+    account isn't an admin of - the bot got promoted just fine, but the
+    channel never showed up in /list_channels because the promoting
+    account wasn't on the allowlist.
+
+    Fixed: registration itself no longer checks who did the promoting.
+    Telegram already gates "can promote this bot to admin" behind that
+    account being an admin of the channel - that's the trust boundary that
+    actually matters, not whether it's specifically one of the operator's
+    allowlisted accounts. The confirmation DM (and the category-tagging
+    prompt) is still always sent to the bot's real operator(s) in
+    ALLOWED_USER_IDS, never to whoever happened to do the promoting, since
+    they're the ones who manage the bot day to day.
     """
     if update.new_chat_member.status != ChatMemberStatus.ADMINISTRATOR:
         return
     if update.old_chat_member.status == ChatMemberStatus.ADMINISTRATOR:
         return  # already was admin (e.g. permissions edited) - not a new add
-
-    actor = update.from_user
-    if not actor or actor.id not in get_settings().allowed_user_id_set:
-        # Someone who isn't an approved operator added the bot somewhere -
-        # ignore silently rather than auto-registering a stranger's channel.
-        return
 
     chat = update.chat
     async with session() as s:
@@ -413,7 +425,11 @@ async def channel_admin_added(update: types.ChatMemberUpdated) -> None:
         if res.scalars().first():
             return  # already registered
 
-        ch = Channel(owner_user_id=actor.id, chat_id=chat.id, title=chat.title or str(chat.id))
+        operators = sorted(get_settings().allowed_user_id_set)
+        actor = update.from_user
+        owner_id = operators[0] if operators else (actor.id if actor else 0)
+
+        ch = Channel(owner_user_id=owner_id, chat_id=chat.id, title=chat.title or str(chat.id))
         s.add(ch)
         await s.commit()
         ch_id = ch.id
@@ -422,10 +438,12 @@ async def channel_admin_added(update: types.ChatMemberUpdated) -> None:
         res2 = await s.execute(q2)
         categories = res2.scalars().all()
 
+    added_by = f"\nAdded by: {actor.full_name}" if actor and actor.full_name else ""
     text = (
         "✅ CHANNEL REGISTERED\n\n"
         f"Title: {chat.title}\n"
-        f"ID: {ch_id}\n\n"
+        f"ID: {ch_id}"
+        f"{added_by}\n\n"
         "I noticed I was made admin here and added it automatically - "
         "no need to run /add_channel.\n\n"
     )
@@ -443,12 +461,16 @@ async def channel_admin_added(update: types.ChatMemberUpdated) -> None:
     else:
         text += "No categories exist yet - create one with ➕ Add Category, then assign it via /list_channels."
 
-    try:
-        await update.bot.send_message(actor.id, text, reply_markup=kb)
-    except Exception:
-        # Operator hasn't opened a DM with the bot yet - registration still
-        # succeeded, they'll see it in /list_channels.
-        pass
+    # Notify every approved operator, not just whoever did the promoting -
+    # that way the person actually running the bot always finds out, even
+    # when a different (alt) account was used to add the bot somewhere.
+    for op_id in operators:
+        try:
+            await update.bot.send_message(op_id, text, reply_markup=kb)
+        except Exception:
+            # That operator hasn't opened a DM with the bot yet -
+            # registration still succeeded, they'll see it in /list_channels.
+            pass
 
 
 @router.callback_query(F.data.startswith("achcat_"))
