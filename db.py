@@ -33,6 +33,15 @@ async def init_db() -> None:
         )
         row = result.fetchone()
         if row and row[0] and "album" not in row[0].lower():
+            # Defensive: a *previous* migration (the one that added VIDEO
+            # support) used this same posts_old -> rebuild -> drop dance and,
+            # going by production logs, left a posts_old table behind
+            # without cleaning it up - which then made THIS migration's own
+            # rename fail with "there is already another table ... named
+            # posts_old" the moment it ran (crash-looping the whole bot).
+            # Dropping any leftover first makes the rename idempotent no
+            # matter what state a prior interrupted migration left behind.
+            await conn.exec_driver_sql("DROP TABLE IF EXISTS posts_old")
             await conn.exec_driver_sql("ALTER TABLE posts RENAME TO posts_old")
             await conn.run_sync(lambda sync_conn: models.Post.__table__.create(sync_conn))
             await conn.exec_driver_sql(
