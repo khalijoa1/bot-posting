@@ -37,12 +37,19 @@ def _cancel_kb():
     )
 
 
-def _parse_replacements(text: str) -> dict[str, str]:
+def _parse_replacements(text: str) -> tuple[dict[str, str], str | None]:
     """Parse lines like 'https://t.me/source -> https://t.me/mine' (also
-    accepts '=' or '|' as the separator) into an {old: new} dict. Blank
-    lines and lines without a separator are skipped rather than raising,
-    so one typo doesn't nuke every other line the user typed."""
+    accepts '=' or '|' as the separator) into an {old: new} dict, plus an
+    optional fallback line using '*' (or 'any'/'default'/'fallback') on the
+    left side, e.g. '* -> https://t.me/mychannel' or '* -> @mychannel'.
+
+    The fallback is what every OTHER link or @mention in a forwarded post
+    gets swapped for - anything that isn't one of the specific pairs above.
+    Blank lines and lines without a separator are skipped rather than
+    raising, so one typo doesn't nuke every other line the user typed.
+    """
     mapping: dict[str, str] = {}
+    fallback: str | None = None
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -51,10 +58,14 @@ def _parse_replacements(text: str) -> dict[str, str]:
             if sep in line:
                 old, new = line.split(sep, 1)
                 old, new = old.strip(), new.strip()
-                if old and new:
+                if not new:
+                    break
+                if old.lower() in ("*", "any", "default", "fallback"):
+                    fallback = new
+                elif old:
                     mapping[old] = new
                 break
-    return mapping
+    return mapping, fallback
 
 
 async def _rule_detail_view(rule_id: int) -> tuple[str, types.InlineKeyboardMarkup] | None:
@@ -73,6 +84,7 @@ async def _rule_detail_view(rule_id: int) -> tuple[str, types.InlineKeyboardMark
         except Exception:
             repls = {}
         mapping = repls.get("default", {}) if isinstance(repls, dict) else {}
+        fallback = repls.get("fallback") if isinstance(repls, dict) else None
 
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -80,13 +92,18 @@ async def _rule_detail_view(rule_id: int) -> tuple[str, types.InlineKeyboardMark
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
     ]
     if mapping:
-        lines.append("Link replacements:")
+        lines.append("Specific link replacements:")
         for old, new in mapping.items():
             lines.append(f"  {old}\n  → {new}")
     else:
+        lines.append("No specific link replacements set.")
+    if fallback:
+        lines.append(f"\nAny other link/@username → {fallback}")
+    else:
         lines.append(
-            "No link replacements set - posts forward with their original "
-            "links untouched. Tap ✏️ Edit Links to add some."
+            "\nAny other link/@username in a post → removed. The source's "
+            "own link or username is never posted as-is - it's either "
+            "swapped for one of yours or stripped out."
         )
 
     rows = [
@@ -206,10 +223,14 @@ async def cb_edit_replacements_start(query: types.CallbackQuery, state: FSMConte
         "old_link -> your_link\n\n"
         "Example:\n"
         "https://t.me/sourcechannel -> https://t.me/mychannel\n"
-        "https://t.me/sourcechannel/bot -> https://t.me/mychannel/bot\n\n"
-        "This replaces every occurrence of the left side with the right side "
-        "in each forwarded post before it's sent. Send 'clear' to remove all "
-        "replacements for this rule.",
+        "@sourcechannel -> @mychannel\n"
+        "* -> https://t.me/mychannel\n\n"
+        "The specific lines above replace an exact link/username. The '*' "
+        "line is the fallback - it catches ANY other link or @username in "
+        "the post (ones you didn't list) and replaces it with that value "
+        "instead. Even without a '*' line, any unlisted link or username is "
+        "still never posted as-is - it's simply removed. Send 'clear' to "
+        "remove all replacements (including the fallback) for this rule.",
         reply_markup=_cancel_kb(),
     )
     await query.answer()
@@ -227,13 +248,18 @@ async def apply_replacements(message: types.Message, state: FSMContext):
     rule_id = data.get("rule_id")
     raw = message.text.strip()
 
-    mapping = {} if raw.lower() == "clear" else _parse_replacements(raw)
-    if raw.lower() != "clear" and not mapping:
-        await message.answer(
-            "❌ Couldn't find any 'old -> new' pairs in that. Try again, one per line, "
-            "or send 'clear' to remove all replacements."
-        )
-        return
+    if raw.lower() == "clear":
+        mapping: dict[str, str] = {}
+        fallback: str | None = None
+    else:
+        mapping, fallback = _parse_replacements(raw)
+        if not mapping and not fallback:
+            await message.answer(
+                "❌ Couldn't find any 'old -> new' pairs (or a '*' fallback line) in "
+                "that. Try again, one per line, or send 'clear' to remove all "
+                "replacements."
+            )
+            return
 
     async with session() as s:
         rule = await s.get(RepostRule, rule_id)
@@ -248,14 +274,26 @@ async def apply_replacements(message: types.Message, state: FSMContext):
         except Exception:
             repls = {}
         repls["default"] = mapping
+        if fallback:
+            repls["fallback"] = fallback
+        else:
+            repls.pop("fallback", None)
         rule.replacements_json = json.dumps(repls)
         await s.commit()
 
     await state.clear()
-    await message.answer(
-        f"✅ Saved {len(mapping)} link replacement(s) for this rule." if mapping
-        else "✅ Cleared link replacements for this rule."
-    )
+    if mapping or fallback:
+        parts = []
+        if mapping:
+            parts.append(f"{len(mapping)} specific replacement(s)")
+        if fallback:
+            parts.append(f"a fallback ({fallback})")
+        await message.answer(f"✅ Saved {' and '.join(parts)} for this rule.")
+    else:
+        await message.answer(
+            "✅ Cleared this rule's replacements - any link/@username in a "
+            "forwarded post will now just be stripped out."
+        )
     text, kb = await _rule_detail_view(rule_id)
     await message.answer(text, reply_markup=kb)
 
