@@ -4,6 +4,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from db import session
 from handlers.common import main_menu_kb
@@ -98,11 +99,15 @@ async def list_categories(message: types.Message):
 
 async def _channel_category_kb(ch_id: int):
     """Build the (title, keyboard) pair for toggling one channel's categories.
-    Re-fetches everything inside a single session to avoid lazy-load errors
-    on relationships accessed after the session closes.
+    Re-fetches everything inside a single session, eagerly loading the
+    categories relationship (selectinload) so touching ch.categories below
+    doesn't trigger an implicit lazy-load SELECT outside of a greenlet
+    context - that raises sqlalchemy.exc.MissingGreenlet and kills this
+    handler before it ever replies, which is what "the button doesn't
+    respond" reports were actually caused by.
     """
     async with session() as s:
-        ch = await s.get(Channel, ch_id)
+        ch = await s.get(Channel, ch_id, options=[selectinload(Channel.categories)])
         if not ch:
             return None
         title = ch.title
@@ -193,7 +198,7 @@ async def toggle_channel_category(query: types.CallbackQuery):
     ch_id, cat_id = int(ch_id_s), int(cat_id_s)
 
     async with session() as s:
-        ch = await s.get(Channel, ch_id)
+        ch = await s.get(Channel, ch_id, options=[selectinload(Channel.categories)])
         cat = await s.get(Category, cat_id)
         if not ch or not cat:
             await query.answer("Not found", show_alert=True)
@@ -215,7 +220,7 @@ async def toggle_channel_category(query: types.CallbackQuery):
 async def finish_channel_categories(query: types.CallbackQuery):
     ch_id = int(query.data.replace("chcatdone_", ""))
     async with session() as s:
-        ch = await s.get(Channel, ch_id)
+        ch = await s.get(Channel, ch_id, options=[selectinload(Channel.categories)])
         title = ch.title if ch else "?"
         cat_names = [c.name for c in ch.categories] if ch else []
 

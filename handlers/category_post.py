@@ -5,6 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from datetime import datetime, timedelta
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from db import session
 from handlers.common import auto_delete_kb, main_menu_kb, parse_duration
@@ -67,7 +68,11 @@ async def handle_category_select(query: types.CallbackQuery, state: FSMContext):
     cat_id = int(query.data.replace("postcat_", ""))
 
     async with session() as s:
-        cat = await s.get(Category, cat_id)
+        # Eagerly load channels here (selectinload) - a plain lazy access
+        # to cat.channels below, outside an active greenlet, raises
+        # sqlalchemy.exc.MissingGreenlet and silently kills this handler,
+        # which is why tapping a category sometimes appeared to do nothing.
+        cat = await s.get(Category, cat_id, options=[selectinload(Category.channels)])
         if not cat or not cat.channels:
             await query.answer("No channels in this category", show_alert=True)
             return
@@ -188,7 +193,10 @@ async def do_category_post(state: FSMContext, user_id: int, answer, auto_delete_
     failed = []
 
     async with session() as s:
-        cat = await s.get(Category, cat_id)
+        # selectinload here for the same reason as handle_category_select
+        # above - avoids an implicit lazy-load on cat.channels that would
+        # crash mid-send with sqlalchemy.exc.MissingGreenlet.
+        cat = await s.get(Category, cat_id, options=[selectinload(Category.channels)])
         channels = cat.channels if cat else []
 
         delete_at = datetime.now() + timedelta(seconds=auto_delete_seconds) if auto_delete_seconds else None

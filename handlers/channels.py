@@ -15,6 +15,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from config import get_settings
 from db import session
@@ -286,9 +287,16 @@ async def list_channels(message: types.Message):
     text = "━━━━━━━━━━━━━━━━━━\n📍 CHANNELS\n━━━━━━━━━━━━━━━━━━\n\n"
 
     for ch in channels:
-        # Get fresh data to avoid lazy loading
+        # Get fresh data, eagerly loading categories in the same query so
+        # touching fresh_ch.categories below doesn't trigger an implicit
+        # lazy-load SELECT outside of a greenlet context (which raises
+        # sqlalchemy.exc.MissingGreenlet and silently kills this handler -
+        # the exact cause of "the button just doesn't respond" reports,
+        # since the crash happens before Telegram gets any reply back).
         async with session() as s:
-            fresh_ch = await s.get(Channel, ch.id)
+            fresh_ch = await s.get(
+                Channel, ch.id, options=[selectinload(Channel.categories)]
+            )
             cat_names = [c.name for c in fresh_ch.categories] if fresh_ch.categories else []
 
         cats = ", ".join(cat_names) if cat_names else "None"
@@ -479,7 +487,10 @@ async def finish_auto_channel_category(query: types.CallbackQuery) -> None:
     selected = _pending_cat_selection.pop(ch_id, set())
 
     async with session() as s:
-        ch = await s.get(Channel, ch_id)
+        # Eagerly load categories so appending to the collection below
+        # doesn't need an implicit lazy-load (see list_channels comment
+        # above for why that crashes this handler under async SQLAlchemy).
+        ch = await s.get(Channel, ch_id, options=[selectinload(Channel.categories)])
         if ch and selected:
             q = select(Category).where(Category.id.in_(selected))
             res = await s.execute(q)
