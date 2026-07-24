@@ -24,8 +24,9 @@ WELCOME_TEXT = (
     "📍 Channels - Manage channels\n"
     "📁 Categories - Organize channels\n"
     "🛡️ Moderation - Keep groups clean\n"
+    "📡 Forwarding - Repost from other channels, with your links swapped in\n"
     "⚙️ Settings - Auto-approve\n"
-    "📊 Analytics - View stats\n"
+    "📊 Analytics - View stats + channel growth\n"
     "❓ Help - All commands\n\n"
     "💡 Stuck in the middle of something? Send /cancel any time to "
     "back out and return here."
@@ -107,10 +108,15 @@ HELP_TEXT = (
     "/moderation - Configure rules\n"
     "/list_groups - View groups\n"
     "/remove_group - Stop moderating\n\n"
+    "📡 FORWARDING (use the 📡 Forwarding menu button for a guided flow):\n"
+    "/add_source - Watch a channel\n"
+    "/list_sources, /remove_source\n"
+    "/add_rule - Forward source -> your channel\n"
+    "/list_rules, /remove_rule\n\n"
     "⚙️ SETTINGS:\n"
     "/autoapprove - Auto-approve\n\n"
     "📊 ANALYTICS:\n"
-    "/analytics - Stats\n\n"
+    "/analytics - Stats + channel growth\n\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 )
 
@@ -232,7 +238,10 @@ async def nav_analytics(query: types.CallbackQuery):
 
 # ---------------------------------------------------------------------------
 # Action buttons - each opens the same flow the old /command would have,
-# just triggered from a submenu tap instead of typed text.
+# just triggered from a submenu tap instead of typed text. The 📡 Forwarding
+# button on the main menu (callback_data "fwd:root") is handled directly by
+# handlers/sources.py instead of routed through here, since its own screen
+# (source list) IS the submenu - no separate static page needed.
 # ---------------------------------------------------------------------------
 
 @router.callback_query(F.data == "act:compose")

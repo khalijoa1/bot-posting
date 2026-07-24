@@ -1,9 +1,12 @@
 """Post management - view, edit, delete."""
+import json
+
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from db import session
 from handlers.common import main_menu_kb
@@ -118,8 +121,10 @@ async def get_post_id(message: types.Message, state: FSMContext):
         f"Post ID: {post_id}\n"
         f"Channels: {len(targets)}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Send the NEW TEXT (or new caption, if this is a photo/video post):\n"
-        f"(Will update in all {len(targets)} channels)",
+        f"Send the NEW TEXT (or new caption, if this is a photo/video/album post):\n"
+        f"(Will update in all {len(targets)} channels. For an album, only the "
+        f"first item's caption is changed, since that's the only one Telegram "
+        f"shows.)",
         reply_markup=kb
     )
     await state.set_state(EditState.new_text)
@@ -145,13 +150,15 @@ async def apply_edit(message: types.Message, state: FSMContext):
         post.text = new_text
         s.add(post)
 
-        tq = select(PostTarget).where(PostTarget.post_id == post_id)
+        tq = select(PostTarget).where(PostTarget.post_id == post_id).options(selectinload(PostTarget.channel))
         tres = await s.execute(tq)
         targets = tres.scalars().all()
 
         success = 0
         failed = []
         for target in targets:
+            if target.message_id is None:
+                continue
             try:
                 if post.content_type == ContentType.TEXT:
                     await bot.edit_message_text(
@@ -160,8 +167,9 @@ async def apply_edit(message: types.Message, state: FSMContext):
                         text=new_text
                     )
                 else:
-                    # Photo/video posts don't have a "text" body - the typed
-                    # replacement becomes the new caption instead.
+                    # Photo/video/album posts don't have a "text" body - the
+                    # typed replacement becomes the new caption instead
+                    # (on the first message, for an album).
                     await bot.edit_message_caption(
                         chat_id=target.channel.chat_id,
                         message_id=target.message_id,
@@ -181,7 +189,7 @@ async def apply_edit(message: types.Message, state: FSMContext):
     )
 
     if failed:
-        result += f"\n\n❌ Failed:\n" + "\n".join([f"  • {c}" for c in failed])
+        result += f"\n\n❌ Failed:\n" + "\n".join([f" • {c}" for c in failed])
 
     await message.answer(result, reply_markup=main_menu_kb())
     await state.clear()
@@ -233,16 +241,27 @@ async def confirm_delete(message: types.Message, state: FSMContext):
             await state.clear()
             return
 
-        tq = select(PostTarget).where(PostTarget.post_id == post_id)
+        tq = select(PostTarget).where(PostTarget.post_id == post_id).options(selectinload(PostTarget.channel))
         tres = await s.execute(tq)
         targets = tres.scalars().all()
 
         success = 0
         failed = []
         for target in targets:
-            if target.message_id is not None:
+            # For an ALBUM post this also deletes the other items stored in
+            # extra_message_ids - previously only the single message_id was
+            # ever deleted, so a 3-video album post would leave 2 stray
+            # videos behind in the channel after "deleting" it.
+            ids = [target.message_id] if target.message_id is not None else []
+            if target.extra_message_ids:
                 try:
-                    await bot.delete_message(chat_id=target.channel.chat_id, message_id=target.message_id)
+                    ids.extend(json.loads(target.extra_message_ids))
+                except Exception:
+                    pass
+            if ids:
+                try:
+                    for mid in ids:
+                        await bot.delete_message(chat_id=target.channel.chat_id, message_id=mid)
                     success += 1
                 except Exception:
                     failed.append(target.channel.title)
@@ -253,7 +272,7 @@ async def confirm_delete(message: types.Message, state: FSMContext):
 
     result = f"✅ DELETED from {success} channel(s)"
     if failed:
-        result += f"\n\n❌ Failed:\n" + "\n".join([f"  • {c}" for c in failed])
+        result += f"\n\n❌ Failed:\n" + "\n".join([f" • {c}" for c in failed])
 
     await message.answer(result, reply_markup=main_menu_kb())
     await state.clear()

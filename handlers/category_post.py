@@ -1,4 +1,6 @@
 """Post to all channels in a category, with optional auto-delete."""
+import json
+
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -8,8 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from db import session
-from handlers.common import auto_delete_kb, main_menu_kb, parse_duration
-from models import Category, ContentType, Post, PostStatus, PostTarget
+from handlers.common import auto_delete_kb, collect_album_item, main_menu_kb, parse_duration
+from models import Category, ContentType, Post, PostMediaItem, PostStatus, PostTarget
 
 router = Router()
 
@@ -83,7 +85,8 @@ async def handle_category_select(query: types.CallbackQuery, state: FSMContext):
     await query.message.answer(
         f"📁 {cat_name}\n\n"
         f"Channels: {cat_channel_count}\n\n"
-        f"Send message text, or a photo/video (with an optional caption):",
+        f"Send message text, or a photo/video (with an optional caption) - "
+        f"multiple photos/videos together as one album work too:",
         reply_markup=types.ReplyKeyboardMarkup(
             keyboard=[[types.KeyboardButton(text="❌ Cancel")]],
             resize_keyboard=True
@@ -107,6 +110,27 @@ async def _ask_category_auto_delete(message: types.Message, state: FSMContext) -
 async def cancel_category_text(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
+@router.message(CategoryPostState.message_text, F.media_group_id, F.photo | F.video)
+async def handle_category_album_item(message: types.Message, state: FSMContext):
+    """Capture one item of a multi-photo/video album (see
+    handlers/compose.py:get_message_album_item for the full rationale -
+    same buffering logic, just funneled into the category-post flow's next
+    step (auto-delete) instead of a channel picker."""
+    kind = "video" if message.video else "photo"
+    file_id = message.video.file_id if message.video else message.photo[-1].file_id
+    caption = (message.caption or "").strip()
+
+    async def _on_ready(msg: types.Message, items: list[dict]):
+        cap = next((it["caption"] for it in items if it.get("caption")), "")
+        await state.update_data(
+            content_type="album", album_items=items, text=cap,
+            photo_file_id=None, video_file_id=None,
+        )
+        await _ask_category_auto_delete(msg, state)
+
+    await collect_album_item(message, {"type": kind, "file_id": file_id, "caption": caption}, _on_ready)
 
 
 @router.message(CategoryPostState.message_text, F.photo)
@@ -180,14 +204,35 @@ async def handle_category_custom_auto_delete(message: types.Message, state: FSMC
     await do_category_post(state, message.from_user.id, message.answer, seconds)
 
 
+def _build_media_group(items: list[dict], caption: str | None) -> list:
+    media = []
+    for i, it in enumerate(items):
+        cap = caption if i == 0 else None
+        if it["type"] == "video":
+            media.append(types.InputMediaVideo(media=it["file_id"], caption=cap))
+        else:
+            media.append(types.InputMediaPhoto(media=it["file_id"], caption=cap))
+    return media
+
+
+def _split_result(result) -> tuple[int | None, str | None]:
+    if isinstance(result, list):
+        if not result:
+            return None, None
+        first, rest = result[0], result[1:]
+        return first.message_id, (json.dumps([m.message_id for m in rest]) if rest else None)
+    return result.message_id, None
+
+
 async def do_category_post(state: FSMContext, user_id: int, answer, auto_delete_seconds: int | None) -> None:
-    """Send the composed text/photo/video to every channel in the chosen category."""
+    """Send the composed text/photo/video/album to every channel in the chosen category."""
     data = await state.get_data()
     cat_id = data.get("category_id")
     text = data.get("text")
     content_type = data.get("content_type", "text")
     photo_file_id = data.get("photo_file_id")
     video_file_id = data.get("video_file_id")
+    album_items = data.get("album_items")
 
     success = 0
     failed = []
@@ -214,6 +259,11 @@ async def do_category_post(state: FSMContext, user_id: int, answer, auto_delete_
         s.add(post)
         await s.flush()
 
+        if content_type == "album" and album_items:
+            for i, it in enumerate(album_items):
+                s.add(PostMediaItem(post_id=post.id, position=i, media_type=it["type"], file_id=it["file_id"]))
+            await s.flush()
+
         # `answer` is a bound method on the Message/CallbackQuery that carries
         # its own bot instance, so grab it from there instead of importing
         # a fresh Bot.
@@ -221,16 +271,22 @@ async def do_category_post(state: FSMContext, user_id: int, answer, auto_delete_
 
         for ch in channels:
             try:
-                if content_type == "photo" and photo_file_id:
-                    msg = await bot.send_photo(chat_id=ch.chat_id, photo=photo_file_id, caption=text or None)
+                if content_type == "album" and album_items:
+                    media = _build_media_group(album_items, text or None)
+                    result = await bot.send_media_group(chat_id=ch.chat_id, media=media)
+                elif content_type == "photo" and photo_file_id:
+                    result = await bot.send_photo(chat_id=ch.chat_id, photo=photo_file_id, caption=text or None)
                 elif content_type == "video" and video_file_id:
-                    msg = await bot.send_video(chat_id=ch.chat_id, video=video_file_id, caption=text or None)
+                    result = await bot.send_video(chat_id=ch.chat_id, video=video_file_id, caption=text or None)
                 else:
-                    msg = await bot.send_message(chat_id=ch.chat_id, text=text or "")
+                    result = await bot.send_message(chat_id=ch.chat_id, text=text or "")
+
+                message_id, extra_ids = _split_result(result)
                 target = PostTarget(
                     post_id=post.id,
                     channel_id=ch.id,
-                    message_id=msg.message_id,
+                    message_id=message_id,
+                    extra_message_ids=extra_ids,
                     sent_at=datetime.now(),
                 )
                 s.add(target)

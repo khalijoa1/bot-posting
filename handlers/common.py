@@ -1,5 +1,8 @@
-"""Shared helpers for post-composition handlers (auto-delete duration UI)
-and app-wide navigation (the persistent main-menu keyboard)."""
+"""Shared helpers for post-composition handlers (auto-delete duration UI,
+album/media-group buffering) and app-wide navigation (the persistent
+main-menu keyboard)."""
+import asyncio
+
 from aiogram import types
 
 
@@ -30,10 +33,13 @@ def main_menu_kb() -> types.InlineKeyboardMarkup:
                 types.InlineKeyboardButton(text="🛡️ Moderation", callback_data="menu:moderation"),
             ],
             [
+                types.InlineKeyboardButton(text="📡 Forwarding", callback_data="fwd:root"),
                 types.InlineKeyboardButton(text="⚙️ Settings", callback_data="menu:settings"),
-                types.InlineKeyboardButton(text="📊 Analytics", callback_data="menu:analytics"),
             ],
-            [types.InlineKeyboardButton(text="❓ Help", callback_data="menu:help")],
+            [
+                types.InlineKeyboardButton(text="📊 Analytics", callback_data="menu:analytics"),
+                types.InlineKeyboardButton(text="❓ Help", callback_data="menu:help"),
+            ],
         ]
     )
 
@@ -85,3 +91,51 @@ def parse_duration(text: str) -> int | None:
     if multiplier is None or value <= 0:
         raise ValueError(f"bad duration: {text}")
     return value * multiplier
+
+
+# ---------------------------------------------------------------------------
+# Album (media-group) buffering.
+#
+# Telegram delivers a multi-photo/video post ("album") as a SEPARATE Update
+# per item, all sharing the same media_group_id - it is never a single
+# message. Without buffering, only the first item of a 3-video album would
+# ever reach the rest of a compose flow (the state had already moved on to
+# "select channels" by the time item 2 arrived), which is exactly the
+# "3 videos + a caption came out differently" bug. This collects every item
+# for a media_group_id and fires a callback once no further item has
+# arrived for a short debounce window.
+# ---------------------------------------------------------------------------
+
+_album_buffers: dict[str, list[dict]] = {}
+_album_tasks: dict[str, asyncio.Task] = {}
+
+
+async def collect_album_item(message: types.Message, item: dict, on_ready) -> None:
+    """Buffer one album item; once the album looks complete, call
+    `await on_ready(message, items)` exactly once with every collected item
+    (each item is the small dict passed in, in arrival order).
+    """
+    mgid = message.media_group_id
+    if not mgid:
+        # Not actually part of an album - handle it immediately as a
+        # single-item "album" so callers don't need a separate code path.
+        await on_ready(message, [item])
+        return
+
+    _album_buffers.setdefault(mgid, []).append(item)
+
+    existing = _album_tasks.get(mgid)
+    if existing and not existing.done():
+        existing.cancel()
+
+    async def _finalize():
+        try:
+            await asyncio.sleep(0.9)
+        except asyncio.CancelledError:
+            return
+        items = _album_buffers.pop(mgid, [])
+        _album_tasks.pop(mgid, None)
+        if items:
+            await on_ready(message, items)
+
+    _album_tasks[mgid] = asyncio.create_task(_finalize())
