@@ -43,6 +43,15 @@ async def init_db() -> None:
             # matter what state a prior interrupted migration left behind.
             await conn.exec_driver_sql("DROP TABLE IF EXISTS posts_old")
             await conn.exec_driver_sql("ALTER TABLE posts RENAME TO posts_old")
+            # SQLite ties index names to the database, not the table they
+            # were created on - renaming "posts" to "posts_old" does NOT
+            # rename ix_posts_owner_user_id along with it, so that index
+            # name stays claimed by the now-renamed table. Recreating
+            # "posts" (via models.Post.__table__.create below, which
+            # includes its own ix_posts_owner_user_id) would then collide
+            # with that leftover name and crash-loop the whole bot on every
+            # restart - drop it explicitly first so the name is free again.
+            await conn.exec_driver_sql("DROP INDEX IF EXISTS ix_posts_owner_user_id")
             await conn.run_sync(lambda sync_conn: models.Post.__table__.create(sync_conn))
             await conn.exec_driver_sql(
                 "INSERT INTO posts (id, owner_user_id, content_type, text, photo_file_id, "
