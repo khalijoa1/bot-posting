@@ -11,7 +11,10 @@ auto-detection doesn't fire (e.g. the bot was added by someone other than
 an approved operator).
 
 Once registered, every member's plain messages in that group are checked
-against the group's rules and acted on automatically.
+against the group's rules and acted on automatically. A group can also
+have a welcome message (sent when someone new joins) and recurring
+messages (sent on a repeating interval) - see handlers/group_messages.py,
+linked from _group_settings_kb below.
 """
 from __future__ import annotations
 
@@ -213,6 +216,12 @@ def _group_settings_kb(g: ModeratedGroup) -> types.InlineKeyboardMarkup:
                 text=f"{_mark(g.spam_action, SpamAction.DELETE_KICK)} Delete + kick immediately",
                 callback_data=f"modspam_{g.id}_delete_kick"
             )],
+            [types.InlineKeyboardButton(text="— 💬 Messages —", callback_data="modnoop")],
+            [types.InlineKeyboardButton(
+                text=f"🎉 Welcome Message ({'ON' if g.welcome_enabled else 'OFF'})",
+                callback_data=f"gwelcome_{g.id}"
+            )],
+            [types.InlineKeyboardButton(text="🔁 Recurring Messages", callback_data=f"grecur_{g.id}")],
             [types.InlineKeyboardButton(text="✅ Done", callback_data="moddone")],
         ]
     )
