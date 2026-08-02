@@ -75,6 +75,11 @@ class Post(Base):
     scheduled_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     auto_delete_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     delete_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # If set, this post repeats: once it is sent and (if auto-delete is set)
+    # deleted, the scheduler recycles the SAME Post row back to SCHEDULED
+    # with a fresh scheduled_time this many seconds in the future, instead
+    # of leaving it DELETED for good. None means "post once".
+    repeat_interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     targets: Mapped[list["PostTarget"]] = relationship(back_populates="post", cascade="all, delete-orphan")
