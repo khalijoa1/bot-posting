@@ -23,10 +23,21 @@ def _target_message_ids(target: PostTarget) -> list[int]:
 
 
 async def run_scheduler_loop(bot: Bot) -> None:
-    """Background scheduler that handles auto-deletion.
+    """Background scheduler that handles auto-deletion and recurring posts.
 
-    Looks for Posts with status == SENT and delete_at <= now(), then deletes
-    the target messages from every channel they were sent to.
+    Two things happen here, both keyed off the SAME Post row so a repeating
+    post keeps its original id/edit-history instead of spawning new rows
+    every cycle:
+
+    1. Posts with status == SENT and delete_at <= now() get their messages
+       deleted from every channel. If the post has repeat_interval_seconds
+       set, it is then recycled back to SCHEDULED (targets cleared, a fresh
+       scheduled_time set) instead of being left DELETED - see
+       services/scheduler.py:run_post_send_loop, which will pick it back up
+       and re-send it like any other scheduled post.
+    2. Repeating posts that have NO auto-delete (so branch 1 never touches
+       them, since delete_at stays None forever) are recycled the same way
+       once repeat_interval_seconds has elapsed since they were last sent.
     """
     while True:
         try:
@@ -55,8 +66,38 @@ async def run_scheduler_loop(bot: Bot) -> None:
                                 await bot.delete_message(chat_id=target.channel.chat_id, message_id=mid)
                             except Exception:
                                 all_deleted = False
-                    if all_deleted:
+                        target.message_id = None
+                        target.extra_message_ids = None
+                        target.sent_at = None
+                    if post.repeat_interval_seconds:
+                        post.status = PostStatus.SCHEDULED
+                        post.scheduled_time = now + timedelta(seconds=post.repeat_interval_seconds)
+                        post.delete_at = None
+                    elif all_deleted:
                         post.status = PostStatus.DELETED
+
+                # Repeating posts with no auto-delete never get a delete_at,
+                # so they'd never be touched above - recycle them here based
+                # on time-since-last-sent instead.
+                q2 = select(Post).where(
+                    Post.status == PostStatus.SENT,
+                    Post.auto_delete_seconds == None,
+                    Post.repeat_interval_seconds != None,
+                ).options(selectinload(Post.targets))
+                res2 = await s.execute(q2)
+                for post in res2.scalars().all():
+                    sent_times = [t.sent_at for t in post.targets if t.sent_at]
+                    if not sent_times:
+                        continue
+                    posted_at = max(sent_times)
+                    if posted_at + timedelta(seconds=post.repeat_interval_seconds) <= now:
+                        for target in post.targets:
+                            target.message_id = None
+                            target.extra_message_ids = None
+                            target.sent_at = None
+                        post.status = PostStatus.SCHEDULED
+                        post.scheduled_time = now
+
                 await s.commit()
             await asyncio.sleep(30)
         except asyncio.CancelledError:
