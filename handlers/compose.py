@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 
 from db import session
-from handlers.common import auto_delete_kb, collect_album_item, main_menu_kb, parse_duration
+from handlers.common import auto_delete_kb, collect_album_item, format_duration, main_menu_kb, parse_duration, repeat_kb
 from models import Channel, ContentType, Post, PostMediaItem, PostStatus, PostTarget
 
 router = Router()
@@ -21,6 +21,7 @@ class ComposeState(StatesGroup):
     schedule_choice = State()
     schedule_time = State()
     auto_delete = State()
+    repeat_choice = State()
 
 
 def cancel_kb():
@@ -341,11 +342,7 @@ async def handle_auto_delete(query: types.CallbackQuery, state: FSMContext):
     await state.update_data(auto_delete_seconds=auto_delete_seconds)
     await query.answer()
 
-    data = await state.get_data()
-    if data.get("scheduled_time"):
-        await post_scheduled(state, query.from_user.id, query.message.answer)
-    else:
-        await post_now(state, query.bot, query.from_user.id, query.message.answer)
+    await ask_repeat(query.message, state)
 
 
 @router.message(ComposeState.auto_delete, F.text == "❌ Cancel")
@@ -365,6 +362,77 @@ async def handle_custom_auto_delete(message: types.Message, state: FSMContext):
         return
 
     await state.update_data(auto_delete_seconds=seconds)
+
+    await ask_repeat(message, state)
+
+
+async def ask_repeat(target: types.Message, state: FSMContext):
+    """Ask whether this post should repeat on an interval.
+
+    A repeating post is re-sent to the same channels every interval,
+    honoring the auto-delete duration chosen in the previous step on each
+    occurrence - see services/scheduler.py for how the recycling works.
+    """
+    await target.answer(
+        "🔁 REPEAT THIS POST?\n\n"
+        "Automatically re-post it on a schedule? Each repost will still "
+        "follow the auto-delete duration you just picked.",
+        reply_markup=repeat_kb("rp")
+    )
+    await state.set_state(ComposeState.repeat_choice)
+
+
+@router.callback_query(ComposeState.repeat_choice, F.data.startswith("rp_"))
+async def handle_repeat(query: types.CallbackQuery, state: FSMContext):
+    """Handle a preset repeat-interval choice, then finalize the post."""
+    choice = query.data.replace("rp_", "")
+
+    if choice == "cancel":
+        await state.clear()
+        await query.message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+        await query.answer()
+        return
+
+    if choice == "custom":
+        await query.message.answer(
+            "Send how often to repeat, e.g. 30m, 2h, 1d:",
+            reply_markup=cancel_kb()
+        )
+        await query.answer()
+        return
+
+    repeat_interval_seconds = None if choice == "no" else int(choice)
+    await state.update_data(repeat_interval_seconds=repeat_interval_seconds)
+    await query.answer()
+
+    data = await state.get_data()
+    if data.get("scheduled_time"):
+        await post_scheduled(state, query.from_user.id, query.message.answer)
+    else:
+        await post_now(state, query.bot, query.from_user.id, query.message.answer)
+
+
+@router.message(ComposeState.repeat_choice, F.text == "❌ Cancel")
+async def cancel_repeat(message: types.Message, state: FSMContext):
+    """Cancel while typing a custom repeat interval."""
+    await state.clear()
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
+@router.message(ComposeState.repeat_choice, F.text)
+async def handle_custom_repeat(message: types.Message, state: FSMContext):
+    """Parse a custom repeat interval like 30m, 2h, 1d, then finalize."""
+    try:
+        seconds = parse_duration(message.text)
+    except ValueError:
+        await message.answer("❌ Format like 30m, 2h, 1d")
+        return
+
+    if not seconds:
+        await message.answer("❌ Send a duration like 30m, 2h, 1d (not 'no')")
+        return
+
+    await state.update_data(repeat_interval_seconds=seconds)
     await message.answer("✅ Got it...")
 
     data = await state.get_data()
@@ -427,6 +495,7 @@ async def post_now(state: FSMContext, bot, user_id: int, answer) -> None:
     album_items = data.get("album_items")
     selected_ids = data.get("selected_channels", [])
     auto_delete_seconds = data.get("auto_delete_seconds")
+    repeat_interval_seconds = data.get("repeat_interval_seconds")
 
     success = 0
     failed = []
@@ -447,6 +516,7 @@ async def post_now(state: FSMContext, bot, user_id: int, answer) -> None:
             status=PostStatus.SENT,
             auto_delete_seconds=auto_delete_seconds,
             delete_at=delete_at,
+            repeat_interval_seconds=repeat_interval_seconds,
         )
         s.add(post)
         await s.flush()
@@ -478,6 +548,8 @@ async def post_now(state: FSMContext, bot, user_id: int, answer) -> None:
         post_id = post.id
 
     result = f"✅ POSTED!\n\n━━━━━━━━━━\n{success}/{len(channels)}\n━━━━━━━━━━\nID: {post_id}"
+    if repeat_interval_seconds:
+        result += f"\n🔁 Repeats every {format_duration(repeat_interval_seconds)}"
     if failed:
         result += f"\n\n❌ Failed:\n" + "\n".join(failed)
 
@@ -501,6 +573,7 @@ async def post_scheduled(state: FSMContext, user_id: int, answer) -> None:
     selected_ids = data.get("selected_channels", [])
     scheduled_time = data.get("scheduled_time")
     auto_delete_seconds = data.get("auto_delete_seconds")
+    repeat_interval_seconds = data.get("repeat_interval_seconds")
 
     async with session() as s:
         q = select(Channel).where(Channel.id.in_(selected_ids))
@@ -516,6 +589,7 @@ async def post_scheduled(state: FSMContext, user_id: int, answer) -> None:
             status=PostStatus.SCHEDULED,
             scheduled_time=scheduled_time,
             auto_delete_seconds=auto_delete_seconds,
+            repeat_interval_seconds=repeat_interval_seconds,
         )
         s.add(post)
         await s.flush()
@@ -537,8 +611,10 @@ async def post_scheduled(state: FSMContext, user_id: int, answer) -> None:
         f"Time: {time_str}\n"
         f"Channels: {len(channels)}\n"
         f"ID: {post_id}\n"
-        f"━━━━━━━━━━━━━━━"
     )
+    if repeat_interval_seconds:
+        result += f"🔁 Repeats every {format_duration(repeat_interval_seconds)}\n"
+    result += "━━━━━━━━━━━━━━━"
 
     await answer(result, reply_markup=main_menu_kb())
     await state.clear()

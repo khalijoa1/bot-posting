@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from db import session
-from handlers.common import main_menu_kb
+from handlers.common import format_duration, main_menu_kb
 from models import ContentType, Post, PostStatus, PostTarget
 
 router = Router()
@@ -56,8 +56,11 @@ async def list_posts(message: types.Message):
             f"ID: {p.id}\n"
             f"Text: {preview}{'...' if len(p.text or '') > 60 else ''}\n"
             f"Channels: {len(targets)}\n"
-            f"Status: {p.status.value}\n\n"
+            f"Status: {p.status.value}\n"
         )
+        if p.repeat_interval_seconds:
+            text += f"🔁 Repeats every {format_duration(p.repeat_interval_seconds)}\n"
+        text += "\n"
 
     await message.answer(text)
 

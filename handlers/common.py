@@ -77,6 +77,27 @@ def auto_delete_kb(prefix: str) -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+REPEAT_PRESETS = [
+    ("Every 1 hour", 3600),
+    ("Every 6 hours", 21600),
+    ("Every 12 hours", 43200),
+    ("Every 24 hours", 86400),
+]
+
+
+def repeat_kb(prefix: str) -> types.InlineKeyboardMarkup:
+    """Inline keyboard for choosing whether/how often a post repeats.
+
+    `prefix` namespaces callback_data the same way auto_delete_kb does.
+    """
+    rows = [[types.InlineKeyboardButton(text="🚫 Post once (no repeat)", callback_data=f"{prefix}_no")]]
+    for label, seconds in REPEAT_PRESETS:
+        rows.append([types.InlineKeyboardButton(text=label, callback_data=f"{prefix}_{seconds}")])
+    rows.append([types.InlineKeyboardButton(text="Custom", callback_data=f"{prefix}_custom")])
+    rows.append([types.InlineKeyboardButton(text="❌ Cancel", callback_data=f"{prefix}_cancel")])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def parse_duration(text: str) -> int | None:
     """Parse '30m' / '2h' / '1d' / 'no' into seconds (None means no auto-delete).
 
@@ -91,6 +112,19 @@ def parse_duration(text: str) -> int | None:
     if multiplier is None or value <= 0:
         raise ValueError(f"bad duration: {text}")
     return value * multiplier
+
+
+def format_duration(seconds: int) -> str:
+    """Render a seconds count back into a short human string, e.g. 3600 ->
+    '1h'. Used to show repeat/auto-delete intervals in confirmation and
+    listing messages."""
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
 
 
 # ---------------------------------------------------------------------------

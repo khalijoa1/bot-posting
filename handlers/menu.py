@@ -36,7 +36,8 @@ MESSAGING_TEXT = (
     "━━━━━━━━━━━━━━━━━━━━━━\n"
     "📨 MESSAGING\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    "✏️ Compose - Send to channels\n"
+    "✏️ Compose - Send to channels (supports scheduling, auto-delete, and repeat)\n"
+    "📤 Bulk Post - Forward several messages, post them all at once\n"
     "📨 Category - Post to all in category\n"
     "📋 View - See your posts\n"
     "✎️ Edit - Change post text\n"
@@ -90,7 +91,8 @@ HELP_TEXT = (
     "📖 ALL COMMANDS\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     "📨 MESSAGING:\n"
-    "/compose - Post to channels\n"
+    "/compose - Post to channels (schedule, auto-delete, repeat)\n"
+    "/bulkpost - Forward several messages, post them all at once\n"
     "/post_category - Post to category\n"
     "/myposts - View your posts\n"
     "/edit - Edit post\n"
@@ -124,6 +126,7 @@ BACK_ONLY_KB = nav_kb([[("🔙 Back", "menu:main")]])
 
 MESSAGING_KB = nav_kb([
     [("✏️ Compose & Post", "act:compose")],
+    [("📤 Bulk Post", "act:bulkpost")],
     [("📨 Post to Category", "act:post_category")],
     [("📋 View My Posts", "act:myposts")],
     [("✎️ Edit Post", "act:edit"), ("🗑️ Delete Post", "act:delete")],
@@ -249,6 +252,13 @@ async def act_compose(query: types.CallbackQuery, state: FSMContext):
     from handlers.compose import compose_start
     await query.answer()
     await compose_start(query.message, state)
+
+
+@router.callback_query(F.data == "act:bulkpost")
+async def act_bulkpost(query: types.CallbackQuery, state: FSMContext):
+    from handlers.bulkpost import bulkpost_start
+    await query.answer()
+    await bulkpost_start(query.message, state)
 
 
 @router.callback_query(F.data == "act:post_category")
