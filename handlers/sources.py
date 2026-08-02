@@ -24,6 +24,24 @@ class SourceUIState(StatesGroup):
     title = State()
 
 
+def _normalize_identifier(raw: str) -> str:
+    """Strip a leading "@" from a typed username so what's stored always
+    matches the bare form Telethon reports on incoming messages (its
+    `chat.username` attribute never includes the "@"). Numeric chat ids
+    (e.g. -1001234567890) pass through unchanged.
+
+    Without this, a source added exactly the way the README instructs -
+    "a public @username" - got stored WITH the "@" and never matched an
+    incoming post's source channel, so that channel silently never
+    forwarded anything while channels added by numeric id or without the
+    "@" worked fine. services/reposter.py's matching was also hardened to
+    accept either form, but normalizing on the way in here means newly
+    added sources are consistent by construction.
+    """
+    raw = raw.strip()
+    return raw[1:].strip() if raw.startswith("@") else raw
+
+
 def _cancel_kb():
     return types.ReplyKeyboardMarkup(
         keyboard=[[types.KeyboardButton(text="❌ Cancel")]],
@@ -164,7 +182,7 @@ async def cancel_add_source_identifier(message: types.Message, state: FSMContext
 
 @router.message(SourceUIState.identifier, F.text)
 async def get_source_identifier(message: types.Message, state: FSMContext):
-    identifier = message.text.strip()
+    identifier = _normalize_identifier(message.text)
     if not identifier:
         await message.answer("❌ Send a @username or numeric chat id", reply_markup=_cancel_kb())
         return
@@ -225,7 +243,7 @@ async def add_source(message: types.Message, command: CommandObject):
         await message.reply("Usage: /add_source <identifier> [title]\n\nOr use 📡 Forwarding in /start for a guided flow.")
         return
     parts = args.split(None, 1)
-    identifier = parts[0].strip()
+    identifier = _normalize_identifier(parts[0])
     title = parts[1].strip() if len(parts) > 1 else None
     async with session() as s:
         q = select(SourceChannel).where(SourceChannel.identifier == identifier)
@@ -262,7 +280,7 @@ async def remove_source(message: types.Message, command: CommandObject):
     if not args:
         await message.reply("Usage: /remove_source <identifier_or_id>")
         return
-    key = args.strip()
+    key = _normalize_identifier(args.strip())
     async with session() as s:
         try:
             val = int(key)
