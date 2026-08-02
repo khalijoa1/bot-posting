@@ -67,16 +67,68 @@ def _scrub_remaining_links(text: str | None, fallback: str | None) -> str | None
     return text.strip()
 
 
-def _apply_replacements(text: str | None, rule: RepostRule, dest: Channel) -> str | None:
+def _strip_masked_links(text: str | None, entities, fallback: str | None) -> str | None:
+    """Catch "text formatted as a link" - Telegram's own "Create a link"
+    formatting option, which lets a source show arbitrary anchor text (e.g.
+    "Join here" or "Click for more") while an entirely different URL is
+    hidden underneath it. Telethon reports this as a MessageEntityTextUrl
+    entity on the message; critically, the hidden URL never appears
+    anywhere in the message's plain text, so _scrub_remaining_links's
+    regex - which can only see literal characters - has nothing to match
+    and lets the anchor text straight through, still fully clickable and
+    still pointing at the source's own link. This was the actual bug
+    behind "text formatted to a link isn't being replaced, only posted as
+    it is": there was never any code path that even looked at entities,
+    only at the rendered text.
+
+    This walks the message's real entities (independent of what the
+    visible text says) and swaps every masked link's anchor text for the
+    same fallback used for plain links elsewhere - so the hidden URL is
+    gone either way, exactly like a bare https://... link would be
+    treated.
+
+    Entity offsets/lengths are defined in UTF-16 code units per the
+    Telegram Bot API / MTProto spec, not Python string indices (which are
+    per code point) - a message containing any character outside the
+    Basic Multilingual Plane (many emoji) before the link would otherwise
+    make the slice land on the wrong characters. Encoding to UTF-16 first
+    keeps the offsets valid.
+    """
+    if not text or not entities:
+        return text
+
+    masked = [e for e in entities if type(e).__name__ == "MessageEntityTextUrl"]
+    if not masked:
+        return text
+
+    replacement = fallback if fallback else ""
+    buf = text.encode("utf-16-le")
+    replacement_bytes = replacement.encode("utf-16-le")
+    # Rightmost-first so replacing one span doesn't shift the byte offsets
+    # of spans still waiting to be processed.
+    for e in sorted(masked, key=lambda e: e.offset, reverse=True):
+        start = e.offset * 2
+        end = start + e.length * 2
+        if start < 0 or end > len(buf) or start > end:
+            continue
+        buf = buf[:start] + replacement_bytes + buf[end:]
+    return buf.decode("utf-16-le", errors="ignore")
+
+
+def _apply_replacements(text: str | None, entities, rule: RepostRule, dest: Channel) -> str | None:
     """Swap the source channel's links/usernames for the operator's own.
 
-    Two layers:
-    1. Explicit "old -> new" pairs configured on the rule (via the bot's
-       Forwarding UI, or hand-edited on an older rule) - applied first,
-       exact substring match.
-    2. A mandatory scrub pass (_scrub_remaining_links) that catches every
-       link or @mention still left afterward and replaces it with the
-       rule's configured fallback link/username, or strips it if no
+    Three layers, in order:
+    1. Masked-link stripping (_strip_masked_links) - has to run FIRST and
+       against the untouched original text, since it relies on entity
+       offsets that are only valid before any other substitution shifts
+       the text around.
+    2. Explicit "old -> new" pairs configured on the rule (via the bot's
+       Forwarding UI, or hand-edited on an older rule) - exact substring
+       match.
+    3. A mandatory scrub pass (_scrub_remaining_links) that catches every
+       plain link or @mention still left afterward and replaces it with
+       the rule's configured fallback link/username, or strips it if no
        fallback is set. This always runs, even if the rule has no
        replacements configured at all - the source's own link or username
        must never be posted as-is, one way or another.
@@ -86,9 +138,9 @@ def _apply_replacements(text: str | None, rule: RepostRule, dest: Channel) -> st
     /add_rule + hand-edited replacements_json may instead key by
     destination chat_id/channel id - both are honoured here.
 
-    IMPORTANT: step 2's scrub pass has to run over the WHOLE text (that's
+    IMPORTANT: step 3's scrub pass has to run over the WHOLE text (that's
     what guarantees a link nobody explicitly listed still gets caught), but
-    that means it would also catch and re-replace whatever step 1 just
+    that means it would also catch and re-replace whatever step 2 just
     inserted whenever the "new" value is itself a link or @mention - which
     it almost always is (an operator's own channel link/username). Left
     unguarded, a specific "old -> new" replacement would get immediately
@@ -111,6 +163,8 @@ def _apply_replacements(text: str | None, rule: RepostRule, dest: Channel) -> st
         if isinstance(repls, dict):
             mapping = repls.get("default") or repls.get(str(dest.chat_id)) or repls.get(str(dest.id)) or {}
             fallback = repls.get("fallback")
+
+    text = _strip_masked_links(text, entities, fallback)
 
     placeholders: dict[str, str] = {}
     if isinstance(mapping, dict):
@@ -187,14 +241,14 @@ def _build_link_preview(rule: RepostRule) -> LinkPreviewOptions | None:
 # only guaranteed unique within a single chat, not globally.
 # ---------------------------------------------------------------------------
 
-# Each buffered entry is (message_id, caption, kind, download_task) - the
-# download itself is kicked off and stored as a Task the moment the item is
-# registered (see _handle_album_item), NOT awaited to completion first.
+# Each buffered entry is (message_id, caption, entities, kind, download_task) -
+# the download itself is kicked off and stored as a Task the moment the item
+# is registered (see _handle_album_item), NOT awaited to completion first.
 # That decoupling is what lets the debounce timer below track "did every
 # item arrive in time" independently of "how long did each item's own
 # download take" - see the long comment in _handle_album_item for the bug
 # this fixes.
-_album_buffers: dict[tuple[int, int], list[tuple[int, str, str, "asyncio.Future"]]] = {}
+_album_buffers: dict[tuple[int, int], list[tuple[int, str, Any, str, "asyncio.Future"]]] = {}
 _album_tasks: dict[tuple[int, int], asyncio.Task] = {}
 # A little more generous than handlers/common.py's 0.9s debounce: source
 # albums can include large videos whose download can itself take a couple
@@ -230,7 +284,9 @@ async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rule
     """Repost a complete, buffered source album as one Telegram album per
     matching rule, via bot.send_media_group - mirrors _repost_single below,
     but for the multi-item case."""
-    text = next((it["caption"] for it in items if it["caption"]), "") or None
+    cap_item = next((it for it in items if it["caption"]), None)
+    text = cap_item["caption"] if cap_item else None
+    entities = cap_item["entities"] if cap_item else None
 
     async with session() as s:
         post = Post(
@@ -259,7 +315,7 @@ async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rule
             if not dest:
                 continue
 
-            cleaned_text = _apply_replacements(text, rule, dest)
+            cleaned_text = _apply_replacements(text, entities, rule, dest)
             context = {
                 "original_text": cleaned_text or "",
                 "source_title": source.title or "",
@@ -341,6 +397,7 @@ async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list
     download_task = asyncio.ensure_future(message.download_media(bytes))
     pending = _album_buffers.setdefault(key, [])
     pending.append((message.id, (message.message or "").strip(),
+                     getattr(message, "entities", None),
                      "video" if message.video else "photo", download_task))
 
     existing = _album_tasks.get(key)
@@ -358,7 +415,7 @@ async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list
             return
 
         collected: list[dict] = []
-        for msg_id, caption, kind, task in entries:
+        for msg_id, caption, entities, kind, task in entries:
             try:
                 downloaded = await task
             except Exception:
@@ -369,7 +426,7 @@ async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list
                 continue
             if not isinstance(downloaded, (bytes, bytearray)):
                 continue
-            collected.append({"kind": kind, "bytes": downloaded, "caption": caption, "id": msg_id})
+            collected.append({"kind": kind, "bytes": downloaded, "caption": caption, "entities": entities, "id": msg_id})
 
         if not collected:
             return
@@ -391,6 +448,7 @@ async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list
 async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[RepostRule]) -> None:
     """Repost one non-album message - the original per-message send path."""
     text = message.message or None
+    entities = getattr(message, "entities", None)
     photo_bytes: bytes | None = None
     video_bytes: bytes | None = None
     if message.photo:
@@ -425,7 +483,7 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
             if not dest:
                 continue
 
-            cleaned_text = _apply_replacements(text, rule, dest)
+            cleaned_text = _apply_replacements(text, entities, rule, dest)
 
             context = {
                 "original_text": cleaned_text or "",
