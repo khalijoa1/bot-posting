@@ -28,6 +28,15 @@ from models import Channel, Category
 router = Router()
 
 
+def _cancel_kb() -> types.ReplyKeyboardMarkup:
+    """Shared Cancel keyboard, reattached on every retry prompt so a bad
+    input never leaves the user stuck without a visible way out."""
+    return types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text="❌ Cancel")]],
+        resize_keyboard=True,
+    )
+
+
 class ChannelState(StatesGroup):
     chat_id = State()
     title = State()
@@ -74,7 +83,7 @@ async def get_chat_id(message: types.Message, state: FSMContext):
     try:
         chat_id = int(message.text.strip())
     except ValueError:
-        await message.answer("❌ Invalid ID. Send number like -1001234567890")
+        await message.answer("❌ Invalid ID. Send number like -1001234567890", reply_markup=_cancel_kb())
         return
 
     async with session() as s:
@@ -346,7 +355,7 @@ async def delete_confirm(message: types.Message, state: FSMContext):
     try:
         ch_id = int(message.text.strip())
     except ValueError:
-        await message.answer("❌ Invalid ID")
+        await message.answer("❌ Invalid ID", reply_markup=_cancel_kb())
         return
 
     async with session() as s:
@@ -535,7 +544,7 @@ async def cancel_force_join_identifier(message: types.Message, state: FSMContext
 async def get_force_join_identifier(message: types.Message, state: FSMContext):
     identifier = message.text.strip()
     if not identifier:
-        await message.answer("❌ Send a @username or numeric chat id")
+        await message.answer("❌ Send a @username or numeric chat id", reply_markup=_cancel_kb())
         return
     await state.update_data(identifier=identifier)
 
@@ -567,7 +576,7 @@ async def cancel_force_join_link(message: types.Message, state: FSMContext):
 async def get_force_join_link(message: types.Message, state: FSMContext):
     link = message.text.strip()
     if not (link.startswith("http://") or link.startswith("https://") or link.startswith("t.me/")):
-        await message.answer("❌ Send a valid link starting with https://")
+        await message.answer("❌ Send a valid link starting with https://", reply_markup=_cancel_kb())
         return
     await state.update_data(link=link)
     await _finalize_force_join_add(message, state)

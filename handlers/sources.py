@@ -166,14 +166,14 @@ async def cancel_add_source_identifier(message: types.Message, state: FSMContext
 async def get_source_identifier(message: types.Message, state: FSMContext):
     identifier = message.text.strip()
     if not identifier:
-        await message.answer("❌ Send a @username or numeric chat id")
+        await message.answer("❌ Send a @username or numeric chat id", reply_markup=_cancel_kb())
         return
 
     async with session() as s:
         q = select(SourceChannel).where(SourceChannel.identifier == identifier)
         res = await s.execute(q)
         if res.scalars().first():
-            await message.answer("❌ That source is already being watched")
+            await message.answer("❌ That source is already being watched", reply_markup=main_menu_kb())
             await state.clear()
             return
 

@@ -287,7 +287,8 @@ async def apply_replacements(message: types.Message, state: FSMContext):
             await message.answer(
                 "❌ Couldn't find any 'old -> new' pairs (or a '*' fallback line) in "
                 "that. Try again, one per line, or send 'clear' to remove all "
-                "replacements."
+                "replacements.",
+                reply_markup=_cancel_kb(),
             )
             return
 
@@ -356,7 +357,7 @@ async def cancel_edit_button_text(message: types.Message, state: FSMContext):
 async def get_button_text(message: types.Message, state: FSMContext):
     label = message.text.strip()
     if not label:
-        await message.answer("❌ Send some text for the button label")
+        await message.answer("❌ Send some text for the button label", reply_markup=_cancel_kb())
         return
     await state.update_data(button_text=label)
     await state.set_state(RuleUIState.button_url)
@@ -377,7 +378,9 @@ async def cancel_edit_button_url(message: types.Message, state: FSMContext):
 async def get_button_url(message: types.Message, state: FSMContext):
     url = message.text.strip()
     if not (url.startswith("http://") or url.startswith("https://") or url.startswith("tg://")):
-        await message.answer("❌ Link must start with http://, https://, or tg://. Try again:")
+        await message.answer(
+            "❌ Link must start with http://, https://, or tg://. Try again:", reply_markup=_cancel_kb()
+        )
         return
 
     data = await state.get_data()

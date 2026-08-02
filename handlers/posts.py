@@ -15,6 +15,15 @@ from models import ContentType, Post, PostStatus, PostTarget
 router = Router()
 
 
+def _cancel_kb() -> types.ReplyKeyboardMarkup:
+    """Shared Cancel keyboard for this file's edit/delete flows, reattached
+    on every retry prompt so a bad input never leaves the user stuck."""
+    return types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text="🔙 Cancel")]],
+        resize_keyboard=True,
+    )
+
+
 class EditState(StatesGroup):
     post_id = State()
     new_text = State()
@@ -97,13 +106,13 @@ async def get_post_id(message: types.Message, state: FSMContext):
     try:
         post_id = int(message.text.strip())
     except ValueError:
-        await message.answer("❌ Invalid ID. Send a number")
+        await message.answer("❌ Invalid ID. Send a number", reply_markup=_cancel_kb())
         return
 
     async with session() as s:
         post = await s.get(Post, post_id)
         if not post or post.owner_user_id != message.from_user.id:
-            await message.answer("❌ Post not found or not yours")
+            await message.answer("❌ Post not found or not yours", reply_markup=_cancel_kb())
             return
 
         tq = select(PostTarget).where(PostTarget.post_id == post_id)
@@ -111,7 +120,7 @@ async def get_post_id(message: types.Message, state: FSMContext):
         targets = tres.scalars().all()
 
     if not targets:
-        await message.answer("❌ No active messages for this post")
+        await message.answer("❌ No active messages for this post", reply_markup=_cancel_kb())
         return
 
     await state.update_data(post_id=post_id)
@@ -232,7 +241,7 @@ async def confirm_delete(message: types.Message, state: FSMContext):
     try:
         post_id = int(message.text.strip())
     except ValueError:
-        await message.answer("❌ Invalid ID. Send a number")
+        await message.answer("❌ Invalid ID. Send a number", reply_markup=_cancel_kb())
         return
 
     bot = message.bot

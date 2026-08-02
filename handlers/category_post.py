@@ -198,7 +198,7 @@ async def handle_category_custom_auto_delete(message: types.Message, state: FSMC
     try:
         seconds = parse_duration(message.text)
     except ValueError:
-        await message.answer("❌ Format like 30m, 2h, 1d, or 'no'")
+        await message.answer("❌ Format like 30m, 2h, 1d, or 'no'", reply_markup=auto_delete_kb("cad"))
         return
 
     await do_category_post(state, message.from_user.id, message.answer, seconds)

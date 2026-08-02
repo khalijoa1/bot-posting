@@ -148,7 +148,7 @@ async def get_message_text(message: types.Message, state: FSMContext):
     """Get message text."""
     text = message.text.strip()
     if len(text) < 1:
-        await message.answer("❌ Message empty. Try again:")
+        await message.answer("❌ Message empty. Try again:", reply_markup=cancel_kb())
         return
 
     await state.update_data(content_type="text", text=text, photo_file_id=None, video_file_id=None)
@@ -300,7 +300,7 @@ async def handle_custom_minutes(message: types.Message, state: FSMContext):
         if minutes <= 0:
             raise ValueError
     except ValueError:
-        await message.answer("❌ Send a positive number of minutes, e.g. 45")
+        await message.answer("❌ Send a positive number of minutes, e.g. 45", reply_markup=cancel_kb())
         return
 
     scheduled_time = datetime.now() + timedelta(minutes=minutes)
@@ -358,7 +358,7 @@ async def handle_custom_auto_delete(message: types.Message, state: FSMContext):
     try:
         seconds = parse_duration(message.text)
     except ValueError:
-        await message.answer("❌ Format like 30m, 2h, 1d, or 'no'")
+        await message.answer("❌ Format like 30m, 2h, 1d, or 'no'", reply_markup=cancel_kb())
         return
 
     await state.update_data(auto_delete_seconds=seconds)
@@ -425,11 +425,11 @@ async def handle_custom_repeat(message: types.Message, state: FSMContext):
     try:
         seconds = parse_duration(message.text)
     except ValueError:
-        await message.answer("❌ Format like 30m, 2h, 1d")
+        await message.answer("❌ Format like 30m, 2h, 1d", reply_markup=cancel_kb())
         return
 
     if not seconds:
-        await message.answer("❌ Send a duration like 30m, 2h, 1d (not 'no')")
+        await message.answer("❌ Send a duration like 30m, 2h, 1d (not 'no')", reply_markup=cancel_kb())
         return
 
     await state.update_data(repeat_interval_seconds=seconds)
