@@ -28,6 +28,9 @@ router = Router()
 
 class RuleUIState(StatesGroup):
     replacements = State()
+    button_text = State()
+    button_url = State()
+    prefix_text = State()
 
 
 def _cancel_kb():
@@ -106,11 +109,35 @@ async def _rule_detail_view(rule_id: int) -> tuple[str, types.InlineKeyboardMark
             "swapped for one of yours or stripped out."
         )
 
+    lines.append("")
+    if rule.inline_button_text and rule.inline_button_url:
+        lines.append(f"🔘 Button: [{rule.inline_button_text}] → {rule.inline_button_url}")
+    else:
+        lines.append("🔘 Button: none")
+    if rule.prefix_text:
+        preview = rule.prefix_text[:60] + ("..." if len(rule.prefix_text) > 60 else "")
+        lines.append(f"📝 Prefix: {preview}")
+    else:
+        lines.append("📝 Prefix: none")
+    preview_labels = {
+        None: "Telegram default", "default": "Telegram default", "disabled": "Disabled",
+        "small": "Small media", "large": "Large media", "above": "Shown above text",
+    }
+    lines.append(f"🔍 Link preview (text posts only): {preview_labels.get(rule.link_preview_mode, 'Telegram default')}")
+
     rows = [
-        [types.InlineKeyboardButton(text="✏️ Edit Link Replacements", callback_data=f"fwd:editrepl:{rule_id}")],
+        [types.InlineKeyboardButton(text="✏️ Edit Word/Link Replacements", callback_data=f"fwd:editrepl:{rule_id}")],
+        [types.InlineKeyboardButton(text="🔘 Set Button", callback_data=f"fwd:editbtn:{rule_id}")],
+        [types.InlineKeyboardButton(text="📝 Set Prefix Text", callback_data=f"fwd:editprefix:{rule_id}")],
+        [types.InlineKeyboardButton(text="🔍 Link Preview", callback_data=f"fwd:previewmenu:{rule_id}")],
         [types.InlineKeyboardButton(text="🗑️ Remove Rule", callback_data=f"fwd:delrule:{rule_id}")],
         [types.InlineKeyboardButton(text="🔙 Back", callback_data=f"fwd:src:{source_id}")],
     ]
+    if rule.inline_button_text and rule.inline_button_url:
+        rows.insert(2, [types.InlineKeyboardButton(text="🚫 Remove Button", callback_data=f"fwd:delbtn:{rule_id}")])
+    if rule.prefix_text:
+        rows.insert(4 if (rule.inline_button_text and rule.inline_button_url) else 3,
+                     [types.InlineKeyboardButton(text="🚫 Remove Prefix", callback_data=f"fwd:delprefix:{rule_id}")])
     return "\n".join(lines), types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -219,17 +246,20 @@ async def cb_edit_replacements_start(query: types.CallbackQuery, state: FSMConte
     await state.update_data(rule_id=rule_id)
     await state.set_state(RuleUIState.replacements)
     await query.message.answer(
-        "Send the link replacements, one per line, as:\n\n"
-        "old_link -> your_link\n\n"
-        "Example:\n"
+        "Send the replacements, one per line, as:\n\n"
+        "old text -> new text\n\n"
+        "This works for ANY word or phrase, not just links - e.g.:\n"
         "https://t.me/sourcechannel -> https://t.me/mychannel\n"
         "@sourcechannel -> @mychannel\n"
+        "old brand name -> your brand name\n"
         "* -> https://t.me/mychannel\n\n"
-        "The specific lines above replace an exact link/username. The '*' "
-        "line is the fallback - it catches ANY other link or @username in "
-        "the post (ones you didn't list) and replaces it with that value "
-        "instead. Even without a '*' line, any unlisted link or username is "
-        "still never posted as-is - it's simply removed. Send 'clear' to "
+        "Every specific line above does an exact find-and-replace, word or "
+        "link alike. The '*' line is the link/username fallback only - it "
+        "catches ANY other link or @username in the post (ones you didn't "
+        "list) and replaces it with that value instead. Even without a '*' "
+        "line, any unlisted link or username is still never posted as-is - "
+        "it's simply removed. Plain words with no '*' match are left "
+        "untouched unless you list them explicitly above. Send 'clear' to "
         "remove all replacements (including the fallback) for this rule.",
         reply_markup=_cancel_kb(),
     )
@@ -296,6 +326,197 @@ async def apply_replacements(message: types.Message, state: FSMContext):
         )
     text, kb = await _rule_detail_view(rule_id)
     await message.answer(text, reply_markup=kb)
+
+
+# ---------------------------------------------------------------------------
+# Inline button (text + link) on every post this rule forwards.
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("fwd:editbtn:"))
+async def cb_edit_button_start(query: types.CallbackQuery, state: FSMContext):
+    rule_id = int(query.data.split(":")[2])
+    await state.update_data(rule_id=rule_id)
+    await state.set_state(RuleUIState.button_text)
+    await query.message.answer(
+        "Send the BUTTON LABEL (plain text only - Telegram doesn't support "
+        "custom emoji rendering or colored backgrounds on buttons, but you "
+        "can still use a normal emoji character, e.g. \"🔗 Join VIP\"):",
+        reply_markup=_cancel_kb(),
+    )
+    await query.answer()
+
+
+@router.message(RuleUIState.button_text, F.text == "❌ Cancel")
+async def cancel_edit_button_text(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
+@router.message(RuleUIState.button_text, F.text)
+async def get_button_text(message: types.Message, state: FSMContext):
+    label = message.text.strip()
+    if not label:
+        await message.answer("❌ Send some text for the button label")
+        return
+    await state.update_data(button_text=label)
+    await state.set_state(RuleUIState.button_url)
+    await message.answer(
+        "Now send the LINK the button should open (must start with "
+        "http:// or https://, or be a tg:// link):",
+        reply_markup=_cancel_kb(),
+    )
+
+
+@router.message(RuleUIState.button_url, F.text == "❌ Cancel")
+async def cancel_edit_button_url(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
+@router.message(RuleUIState.button_url, F.text)
+async def get_button_url(message: types.Message, state: FSMContext):
+    url = message.text.strip()
+    if not (url.startswith("http://") or url.startswith("https://") or url.startswith("tg://")):
+        await message.answer("❌ Link must start with http://, https://, or tg://. Try again:")
+        return
+
+    data = await state.get_data()
+    rule_id = data.get("rule_id")
+    label = data.get("button_text")
+
+    async with session() as s:
+        rule = await s.get(RepostRule, rule_id)
+        if not rule:
+            await message.answer("❌ Rule not found (it may have been removed)", reply_markup=main_menu_kb())
+            await state.clear()
+            return
+        rule.inline_button_text = label
+        rule.inline_button_url = url
+        await s.commit()
+
+    await state.clear()
+    await message.answer(f"✅ Button set: [{label}] → {url}")
+    text, kb = await _rule_detail_view(rule_id)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("fwd:delbtn:"))
+async def cb_remove_button(query: types.CallbackQuery):
+    rule_id = int(query.data.split(":")[2])
+    async with session() as s:
+        rule = await s.get(RepostRule, rule_id)
+        if rule:
+            rule.inline_button_text = None
+            rule.inline_button_url = None
+            await s.commit()
+    await query.answer("Button removed")
+    text, kb = await _rule_detail_view(rule_id)
+    await query.message.edit_text(text, reply_markup=kb)
+
+
+# ---------------------------------------------------------------------------
+# Prefix text prepended to every post this rule forwards.
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("fwd:editprefix:"))
+async def cb_edit_prefix_start(query: types.CallbackQuery, state: FSMContext):
+    rule_id = int(query.data.split(":")[2])
+    await state.update_data(rule_id=rule_id)
+    await state.set_state(RuleUIState.prefix_text)
+    await query.message.answer(
+        "Send the text to add to the BEGINNING of every post this rule "
+        "forwards (e.g. a header or tagline). Send 'clear' to remove it.",
+        reply_markup=_cancel_kb(),
+    )
+    await query.answer()
+
+
+@router.message(RuleUIState.prefix_text, F.text == "❌ Cancel")
+async def cancel_edit_prefix(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
+@router.message(RuleUIState.prefix_text, F.text)
+async def get_prefix_text(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    rule_id = data.get("rule_id")
+    raw = message.text.strip()
+    new_prefix = None if raw.lower() == "clear" else raw
+
+    async with session() as s:
+        rule = await s.get(RepostRule, rule_id)
+        if not rule:
+            await message.answer("❌ Rule not found (it may have been removed)", reply_markup=main_menu_kb())
+            await state.clear()
+            return
+        rule.prefix_text = new_prefix
+        await s.commit()
+
+    await state.clear()
+    await message.answer("✅ Prefix cleared." if new_prefix is None else "✅ Prefix saved.")
+    text, kb = await _rule_detail_view(rule_id)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("fwd:delprefix:"))
+async def cb_remove_prefix(query: types.CallbackQuery):
+    rule_id = int(query.data.split(":")[2])
+    async with session() as s:
+        rule = await s.get(RepostRule, rule_id)
+        if rule:
+            rule.prefix_text = None
+            await s.commit()
+    await query.answer("Prefix removed")
+    text, kb = await _rule_detail_view(rule_id)
+    await query.message.edit_text(text, reply_markup=kb)
+
+
+# ---------------------------------------------------------------------------
+# Link preview mode (Telegram's link_preview_options) for text posts.
+# ---------------------------------------------------------------------------
+
+_PREVIEW_MODES = [
+    ("Telegram default", "default"),
+    ("🚫 Disabled (no preview)", "disabled"),
+    ("🔹 Small media", "small"),
+    ("🔷 Large media", "large"),
+    ("⬆️ Shown above text", "above"),
+]
+
+
+@router.callback_query(F.data.startswith("fwd:previewmenu:"))
+async def cb_preview_menu(query: types.CallbackQuery):
+    rule_id = int(query.data.split(":")[2])
+    rows = [
+        [types.InlineKeyboardButton(text=label, callback_data=f"fwd:setpreview:{rule_id}:{mode}")]
+        for label, mode in _PREVIEW_MODES
+    ]
+    rows.append([types.InlineKeyboardButton(text="🔙 Back", callback_data=f"fwd:rule:{rule_id}")])
+    await query.message.edit_text(
+        "🔍 LINK PREVIEW (text posts only - media posts never show a link "
+        "preview, that's a Telegram platform behavior):\n\n"
+        "Pick how Telegram should render a link preview on this rule's "
+        "forwarded text posts:",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("fwd:setpreview:"))
+async def cb_set_preview(query: types.CallbackQuery):
+    _, _, rule_id_s, mode = query.data.split(":")
+    rule_id = int(rule_id_s)
+    async with session() as s:
+        rule = await s.get(RepostRule, rule_id)
+        if not rule:
+            await query.answer("Rule not found", show_alert=True)
+            return
+        rule.link_preview_mode = None if mode == "default" else mode
+        await s.commit()
+    await query.answer("✅ Saved")
+    text, kb = await _rule_detail_view(rule_id)
+    await query.message.edit_text(text, reply_markup=kb)
 
 
 # ---------------------------------------------------------------------------

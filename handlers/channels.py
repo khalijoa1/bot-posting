@@ -10,6 +10,8 @@ Channels can be registered two ways:
      (e.g. you want to set everything - title, categories, welcome message -
      in one guided flow up front).
 """
+import json
+
 from aiogram import Router, types, F
 from aiogram.enums import ChatMemberStatus
 from aiogram.filters import Command
@@ -32,6 +34,11 @@ class ChannelState(StatesGroup):
     select_categories = State()
     welcome_msg = State()
     delete_id = State()
+
+
+class ForceJoinState(StatesGroup):
+    add_identifier = State()
+    add_link = State()
 
 
 @router.message(Command("add_channel"))
@@ -377,6 +384,232 @@ async def list_button(message: types.Message):
 async def delete_button(message: types.Message, state: FSMContext):
     """Delete from menu."""
     await delete_channel_start(message, state)
+
+
+# ---------------------------------------------------------------------------
+# Force-join (subscription gate): require members to already belong to
+# specific other channels/groups before their join request to one of YOUR
+# channels gets auto-approved. Only takes effect on channels that already
+# have Auto-Approve turned on (/autoapprove) - see handlers/join_requests.py
+# for the actual gating logic at approval time.
+# ---------------------------------------------------------------------------
+
+def _parse_required(raw: str | None) -> list[dict]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+async def _force_join_channel_list_view() -> tuple[str, types.InlineKeyboardMarkup]:
+    async with session() as s:
+        q = select(Channel)
+        res = await s.execute(q)
+        channels = res.scalars().all()
+
+    text = (
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔒 FORCE-JOIN\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Require someone to already be a member of specific channels/groups "
+        "before their join request to one of your channels gets "
+        "auto-approved. Only applies where Auto-Approve is already on.\n\n"
+        "Pick a channel to configure:"
+    )
+    if not channels:
+        text += "\n\n❌ No channels registered yet."
+    rows = [
+        [types.InlineKeyboardButton(text=f"📍 {ch.title}", callback_data=f"fj:pick:{ch.id}")]
+        for ch in channels
+    ]
+    rows.append([types.InlineKeyboardButton(text="🔙 Back", callback_data="menu:channels")])
+    return text, types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def force_join_start(message: types.Message, state: FSMContext) -> None:
+    await state.clear()
+    text, kb = await _force_join_channel_list_view()
+    await message.answer(text, reply_markup=kb)
+
+
+async def _force_join_detail_view(channel_id: int) -> tuple[str, types.InlineKeyboardMarkup] | None:
+    async with session() as s:
+        ch = await s.get(Channel, channel_id)
+        if not ch:
+            return None
+        required = _parse_required(ch.required_join_json)
+        title = ch.title
+
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔒 FORCE-JOIN for {title}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
+    ]
+    if not required:
+        lines.append("No required channels/groups set - join requests are approved normally.")
+    else:
+        lines.append("Must already be a member of ALL of these before approval:")
+        for r in required:
+            lines.append(f"  • {r.get('title') or r.get('identifier')} ({r.get('identifier')})")
+        lines.append(
+            "\n⚠️ The bot must also be an admin/member of each of these "
+            "itself, otherwise it can't check membership."
+        )
+
+    rows = []
+    for i, r in enumerate(required):
+        rows.append([types.InlineKeyboardButton(
+            text=f"🚫 Remove {r.get('title') or r.get('identifier')}",
+            callback_data=f"fj:del:{channel_id}:{i}",
+        )])
+    rows.append([types.InlineKeyboardButton(text="➕ Add Required Channel", callback_data=f"fj:add:{channel_id}")])
+    rows.append([types.InlineKeyboardButton(text="🔙 Back", callback_data="fj:root")])
+    return "\n".join(lines), types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "fj:root")
+async def cb_force_join_root(query: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    text, kb = await _force_join_channel_list_view()
+    await query.message.edit_text(text, reply_markup=kb)
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("fj:pick:"))
+async def cb_force_join_pick(query: types.CallbackQuery):
+    channel_id = int(query.data.split(":")[2])
+    result = await _force_join_detail_view(channel_id)
+    if not result:
+        await query.answer("Channel not found", show_alert=True)
+        return
+    text, kb = result
+    await query.message.edit_text(text, reply_markup=kb)
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("fj:del:"))
+async def cb_force_join_remove(query: types.CallbackQuery):
+    _, _, channel_id_s, idx_s = query.data.split(":")
+    channel_id, idx = int(channel_id_s), int(idx_s)
+    async with session() as s:
+        ch = await s.get(Channel, channel_id)
+        if ch:
+            required = _parse_required(ch.required_join_json)
+            if 0 <= idx < len(required):
+                required.pop(idx)
+            ch.required_join_json = json.dumps(required) if required else None
+            await s.commit()
+    await query.answer("Removed")
+    result = await _force_join_detail_view(channel_id)
+    if result:
+        text, kb = result
+        await query.message.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("fj:add:"))
+async def cb_force_join_add_start(query: types.CallbackQuery, state: FSMContext):
+    channel_id = int(query.data.split(":")[2])
+    await state.update_data(channel_id=channel_id)
+    await state.set_state(ForceJoinState.add_identifier)
+    await query.message.answer(
+        "Send the channel/group to require, as a public @username or its "
+        "numeric chat id (e.g. -1001234567890). The bot must be an "
+        "admin/member of it to be able to check membership.",
+        reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="❌ Cancel")]], resize_keyboard=True
+        ),
+    )
+    await query.answer()
+
+
+@router.message(ForceJoinState.add_identifier, F.text == "❌ Cancel")
+async def cancel_force_join_identifier(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
+@router.message(ForceJoinState.add_identifier, F.text)
+async def get_force_join_identifier(message: types.Message, state: FSMContext):
+    identifier = message.text.strip()
+    if not identifier:
+        await message.answer("❌ Send a @username or numeric chat id")
+        return
+    await state.update_data(identifier=identifier)
+
+    if identifier.startswith("@"):
+        # Public username - the invite link is just t.me/<username>, no
+        # need to ask for one separately.
+        link = f"https://t.me/{identifier.lstrip('@')}"
+        await state.update_data(link=link)
+        await _finalize_force_join_add(message, state)
+        return
+
+    await state.set_state(ForceJoinState.add_link)
+    await message.answer(
+        "Since that's a numeric id (private channel/group), send the "
+        "invite link to show users so they can join it:",
+        reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="❌ Cancel")]], resize_keyboard=True
+        ),
+    )
+
+
+@router.message(ForceJoinState.add_link, F.text == "❌ Cancel")
+async def cancel_force_join_link(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
+@router.message(ForceJoinState.add_link, F.text)
+async def get_force_join_link(message: types.Message, state: FSMContext):
+    link = message.text.strip()
+    if not (link.startswith("http://") or link.startswith("https://") or link.startswith("t.me/")):
+        await message.answer("❌ Send a valid link starting with https://")
+        return
+    await state.update_data(link=link)
+    await _finalize_force_join_add(message, state)
+
+
+async def _finalize_force_join_add(message: types.Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    channel_id = data.get("channel_id")
+    identifier = data.get("identifier")
+    link = data.get("link")
+
+    async with session() as s:
+        ch = await s.get(Channel, channel_id)
+        if not ch:
+            await message.answer("❌ Channel not found (it may have been removed)", reply_markup=main_menu_kb())
+            await state.clear()
+            return
+        required = _parse_required(ch.required_join_json)
+        if any(r.get("identifier") == identifier for r in required):
+            await message.answer("⚠️ That one's already required for this channel.")
+        else:
+            title = None
+            try:
+                chat = await message.bot.get_chat(identifier)
+                title = chat.title
+            except Exception:
+                pass
+            required.append({"identifier": identifier, "link": link, "title": title})
+            ch.required_join_json = json.dumps(required)
+            await s.commit()
+
+    await state.clear()
+    result = await _force_join_detail_view(channel_id)
+    if result:
+        text, kb = result
+        await message.answer(text, reply_markup=kb)
+
+
+@router.message(lambda msg: msg.text == "🔒 Force-Join")
+async def force_join_button(message: types.Message, state: FSMContext):
+    """Force-join from menu."""
+    await force_join_start(message, state)
 
 
 # ---------------------------------------------------------------------------

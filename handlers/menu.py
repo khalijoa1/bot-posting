@@ -53,7 +53,8 @@ CHANNELS_TEXT = (
     "itself automatically - no need to look up the chat id.\n\n"
     "➕ Add - Add channel manually\n"
     "📋 List - View all\n"
-    "🗑️ Delete - Remove"
+    "🗑️ Delete - Remove\n"
+    "🔒 Force-Join - Require membership in other channels before approval"
 )
 
 CATEGORIES_TEXT = (
@@ -137,6 +138,7 @@ MESSAGING_KB = nav_kb([
 CHANNELS_KB = nav_kb([
     [("➕ Add Channel", "act:add_channel"), ("📋 List Channels", "act:list_channels")],
     [("🗑️ Delete Channel", "act:delete_channel")],
+    [("🔒 Force-Join", "act:forcejoin")],
     [("🔙 Back", "menu:main")],
 ])
 
@@ -317,6 +319,13 @@ async def act_delete_channel(query: types.CallbackQuery, state: FSMContext):
     from handlers.channels import delete_channel_start
     await query.answer()
     await delete_channel_start(query.message, state)
+
+
+@router.callback_query(F.data == "act:forcejoin")
+async def act_forcejoin(query: types.CallbackQuery, state: FSMContext):
+    from handlers.channels import force_join_start
+    await query.answer()
+    await force_join_start(query.message, state)
 
 
 @router.callback_query(F.data == "act:add_category")
