@@ -76,6 +76,29 @@ async def init_db() -> None:
         if post_cols and "repeat_interval_seconds" not in post_cols:
             await conn.exec_driver_sql("ALTER TABLE posts ADD COLUMN repeat_interval_seconds INTEGER")
 
+        # Simple additive columns: per-rule inline button / prefix text /
+        # link preview mode on forwarded posts. NULL on every existing rule
+        # just means "no button, no prefix, Telegram's default preview" -
+        # identical to today's behavior.
+        result4 = await conn.exec_driver_sql("PRAGMA table_info('repost_rules')")
+        rule_cols = [r[1] for r in result4.fetchall()]
+        if rule_cols and "inline_button_text" not in rule_cols:
+            await conn.exec_driver_sql("ALTER TABLE repost_rules ADD COLUMN inline_button_text VARCHAR(64)")
+        if rule_cols and "inline_button_url" not in rule_cols:
+            await conn.exec_driver_sql("ALTER TABLE repost_rules ADD COLUMN inline_button_url VARCHAR(512)")
+        if rule_cols and "prefix_text" not in rule_cols:
+            await conn.exec_driver_sql("ALTER TABLE repost_rules ADD COLUMN prefix_text VARCHAR(512)")
+        if rule_cols and "link_preview_mode" not in rule_cols:
+            await conn.exec_driver_sql("ALTER TABLE repost_rules ADD COLUMN link_preview_mode VARCHAR(16)")
+
+        # Simple additive column: force-subscribe gate on join-request
+        # approval. NULL/empty means no gate - approval works exactly like
+        # before.
+        result5 = await conn.exec_driver_sql("PRAGMA table_info('channels')")
+        chan_cols = [r[1] for r in result5.fetchall()]
+        if chan_cols and "required_join_json" not in chan_cols:
+            await conn.exec_driver_sql("ALTER TABLE channels ADD COLUMN required_join_json TEXT")
+
         await conn.run_sync(Base.metadata.create_all)
 
 

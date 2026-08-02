@@ -36,6 +36,11 @@ class Channel(Base):
     title: Mapped[str] = mapped_column(String(255))
     auto_approve_members: Mapped[bool] = mapped_column(Boolean, default=False)
     welcome_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Force-subscribe: JSON list of {"identifier": "@channel_or_-100id",
+    # "title": str|None, "link": "https://t.me/..."} that a user must already
+    # belong to before their join request to THIS channel gets auto-approved.
+    # None/empty means no gating - approval works exactly as before.
+    required_join_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     targets: Mapped[list["PostTarget"]] = relationship(back_populates="channel")
@@ -154,6 +159,22 @@ class RepostRule(Base):
     caption_template: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     replacements_json: Mapped[str | None] = mapped_column(String, nullable=True)
     auto_delete_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Optional single inline button appended to every post this rule
+    # forwards. Both must be set for the button to show - see
+    # services/reposter.py:_build_button. Telegram buttons only support
+    # plain text (no custom emoji rendering, no background styling), so
+    # inline_button_text is exactly what shows on the button face.
+    inline_button_text: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    inline_button_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Text prepended (with a blank line after it) to every message this rule
+    # forwards, e.g. a channel header/tagline. None means no prefix.
+    prefix_text: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # How Telegram should render the link preview on forwarded TEXT posts
+    # (media posts never get a link preview - that's a Telegram limitation,
+    # not this app's). One of: None/"default" (Telegram's normal behavior),
+    # "disabled", "small", "large", "above" (preview shown above the text
+    # instead of below). See services/reposter.py:_build_link_preview.
+    link_preview_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     source: Mapped["SourceChannel"] = relationship(back_populates="rules")
