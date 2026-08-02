@@ -25,6 +25,10 @@ one or more OTHER channels/groups (configured via 🔒 Force-Join in the
 Channels menu) before their request gets auto-approved. If they're missing
 any, approval is held and they're DMed the list of channels to join plus a
 button to recheck - see handle_join_request and cb_recheck below.
+
+Broadcast audience: every requester handled here is also recorded into
+BroadcastUser (see handlers/broadcast.py) - that's how 📢 Broadcast under
+Settings knows who it's allowed to message later.
 """
 import json
 
@@ -81,6 +85,14 @@ def _force_join_kb(channel_id: int, missing: list[dict]) -> types.InlineKeyboard
 
 @router.chat_join_request()
 async def handle_join_request(update: types.ChatJoinRequest) -> None:
+    # Record every requester into the broadcast audience (see
+    # handlers/broadcast.py) regardless of whether this particular channel
+    # currently has auto-approve on - submitting the join request is
+    # itself the qualifying interaction that lets the bot DM them later,
+    # so there's no reason to gate this behind auto_approve_members below.
+    from handlers.broadcast import record_broadcast_user
+    await record_broadcast_user(update.from_user)
+
     async with session() as s:
         q = select(Channel).where(Channel.chat_id == update.chat.id)
         res = await s.execute(q)

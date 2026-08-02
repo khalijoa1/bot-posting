@@ -25,7 +25,7 @@ WELCOME_TEXT = (
     "📁 Categories - Organize channels\n"
     "🛡️ Moderation - Keep groups clean\n"
     "📡 Forwarding - Repost from other channels, with your links swapped in\n"
-    "⚙️ Settings - Auto-approve\n"
+    "⚙️ Settings - Auto-approve, Broadcast\n"
     "📊 Analytics - View stats + channel growth\n"
     "❓ Help - All commands\n\n"
     "💡 Stuck in the middle of something? Send /cancel any time to "
@@ -84,7 +84,9 @@ SETTINGS_TEXT = (
     "━━━━━━━━━━━━━━━━━━━━━\n"
     "⚙️ SETTINGS\n"
     "━━━━━━━━━━━━━━━━━━━━━\n\n"
-    "🔐 Auto-Approve - Approve join requests"
+    "🔐 Auto-Approve - Approve join requests\n"
+    "📢 Broadcast - Message everyone who's ever submitted a join request "
+    "to one of your channels"
 )
 
 HELP_TEXT = (
@@ -117,7 +119,8 @@ HELP_TEXT = (
     "/add_rule - Forward source -> your channel\n"
     "/list_rules, /remove_rule\n\n"
     "⚙️ SETTINGS:\n"
-    "/autoapprove - Auto-approve\n\n"
+    "/autoapprove - Auto-approve\n"
+    "/broadcast - Message everyone who's ever submitted a join request\n\n"
     "📊 ANALYTICS:\n"
     "/analytics - Stats + channel growth\n\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -154,6 +157,7 @@ MODERATION_KB = nav_kb([
 
 SETTINGS_KB = nav_kb([
     [("🔐 Auto-Approve Members", "act:autoapprove")],
+    [("📢 Broadcast", "act:broadcast")],
     [("🔙 Back", "menu:main")],
 ])
 
@@ -355,3 +359,10 @@ async def act_autoapprove(query: types.CallbackQuery):
     from handlers.settings import auto_approve
     await query.answer()
     await auto_approve(query.message)
+
+
+@router.callback_query(F.data == "act:broadcast")
+async def act_broadcast(query: types.CallbackQuery, state: FSMContext):
+    from handlers.broadcast import broadcast_start
+    await query.answer()
+    await broadcast_start(query.message, state)
