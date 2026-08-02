@@ -152,6 +152,7 @@ async def handle_incoming_message(bot: Bot, event) -> None:
     message = event.message
     chat = await event.get_chat()
     if chat is None:
+        logger.info("repost-debug: event.get_chat() returned None for chat_id=%s - skipping", event.chat_id)
         return
 
     identifier_str = str(event.chat_id)
@@ -174,18 +175,39 @@ async def handle_incoming_message(bot: Bot, event) -> None:
         candidates.add(username)
         candidates.add(f"@{username}")
 
+    # TEMPORARY diagnostic logging - trace every incoming message through the
+    # matching pipeline so a "still not forwarding" report can be root-caused
+    # from the logs instead of guessed at. Safe to remove once forwarding is
+    # confirmed working end-to-end.
+    logger.info(
+        "repost-debug: incoming message chat_id=%s username=%r candidates=%s",
+        identifier_str, username, sorted(candidates),
+    )
+
     async with session() as s:
         q = select(SourceChannel).where(SourceChannel.identifier.in_(candidates))
         res = await s.execute(q)
         source = res.scalars().first()
         if not source:
+            all_sources_q = select(SourceChannel.identifier)
+            all_sources_res = await s.execute(all_sources_q)
+            known = [row[0] for row in all_sources_res.all()]
+            logger.info(
+                "repost-debug: no SourceChannel matched candidates=%s - known identifiers in DB=%s",
+                sorted(candidates), known,
+            )
             return
+
+        logger.info("repost-debug: matched source id=%s identifier=%r title=%r", source.id, source.identifier, source.title)
 
         q2 = select(RepostRule).where(RepostRule.source_channel_id == source.id)
         res2 = await s.execute(q2)
         rules = res2.scalars().all()
         if not rules:
+            logger.info("repost-debug: source id=%s matched but has NO RepostRule rows - nothing to forward to", source.id)
             return
+
+        logger.info("repost-debug: source id=%s has %d rule(s) - proceeding to repost", source.id, len(rules))
 
         text = message.message or None
         photo_bytes: bytes | None = None
@@ -268,6 +290,7 @@ async def handle_incoming_message(bot: Bot, event) -> None:
                 pt = PostTarget(post_id=post.id, channel_id=dest.id, message_id=sent.message_id, sent_at=datetime.utcnow())
                 s.add(pt)
                 await s.commit()
+                logger.info("repost-debug: successfully reposted into dest channel id=%s chat_id=%s title=%r", dest.id, dest.chat_id, dest.title)
             except Exception:
                 logger.exception("Failed to repost into channel %s", dest.title)
                 pt = PostTarget(post_id=post.id, channel_id=dest.id, message_id=None, sent_at=None)
