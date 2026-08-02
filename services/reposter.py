@@ -85,6 +85,18 @@ def _apply_replacements(text: str | None, rule: RepostRule, dest: Channel) -> st
     regardless of destination. Older rules created via the original
     /add_rule + hand-edited replacements_json may instead key by
     destination chat_id/channel id - both are honoured here.
+
+    IMPORTANT: step 2's scrub pass has to run over the WHOLE text (that's
+    what guarantees a link nobody explicitly listed still gets caught), but
+    that means it would also catch and re-replace whatever step 1 just
+    inserted whenever the "new" value is itself a link or @mention - which
+    it almost always is (an operator's own channel link/username). Left
+    unguarded, a specific "old -> new" replacement would get immediately
+    undone by the scrub pass right after being applied. To prevent that,
+    each replacement is swapped in as an inert placeholder token first (one
+    that can't match a link/mention regex), the scrub pass runs against
+    that safely-placeholdered text, and the real replacement values are
+    substituted back in only afterward.
     """
     if not text:
         return text
@@ -100,11 +112,21 @@ def _apply_replacements(text: str | None, rule: RepostRule, dest: Channel) -> st
             mapping = repls.get("default") or repls.get(str(dest.chat_id)) or repls.get(str(dest.id)) or {}
             fallback = repls.get("fallback")
 
+    placeholders: dict[str, str] = {}
     if isinstance(mapping, dict):
-        for old, new in mapping.items():
-            text = text.replace(old, new)
+        for i, (old, new) in enumerate(mapping.items()):
+            if not old:
+                continue
+            token = f"\x00REPL{i}\x00"
+            placeholders[token] = new
+            text = text.replace(old, token)
 
-    return _scrub_remaining_links(text, fallback)
+    text = _scrub_remaining_links(text, fallback)
+
+    for token, new in placeholders.items():
+        text = text.replace(token, new)
+
+    return text
 
 
 def _apply_prefix(text: str | None, rule: RepostRule) -> str | None:
