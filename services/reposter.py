@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import json
 import logging
 import re
@@ -8,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from aiogram import Bot
+from aiogram.enums import ParseMode
 from aiogram.types import (
     BufferedInputFile,
     InlineKeyboardButton,
@@ -47,72 +49,22 @@ _MENTION_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,32}\b")
 _BARE_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
 
 
-def _scrub_remaining_links(text: str | None, fallback: str | None) -> str | None:
-    """Final safety pass: after any explicit replacements have run, nothing
-    that still looks like a link or an @mention is allowed to survive
-    untouched - it's swapped for the operator's own fallback link/username
-    if one is configured, otherwise removed outright. This is what
-    guarantees the source channel's own link or username can never slip
-    into a repost, even for link formats or usernames nobody explicitly
-    configured a replacement for.
+def _scrub_links(text: str, fallback: str | None) -> str:
+    """Replace/remove any plain https://..., www., bare t.me/ link or
+    @mention with the rule's default/fallback link (or strip it if no
+    fallback is set). Used on the stretches of text OUTSIDE any masked
+    link inside _render_repost_content below - a masked link's own hidden
+    URL is handled separately there, by resolving and re-linking it, not
+    by this text-level scrub, so it isn't reprocessed here too.
     """
-    if not text:
-        return text
-
     def _sub(_match: re.Match) -> str:
         return fallback if fallback else ""
 
     text = _LINK_RE.sub(_sub, text)
     text = _MENTION_RE.sub(_sub, text)
-    # Collapse whatever whitespace/blank lines stripping a link left behind.
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def _strip_masked_links(text: str | None, entities, fallback: str | None) -> str | None:
-    """Catch "text formatted as a link" - Telegram's own "Create a link"
-    formatting option, which lets a source show arbitrary anchor text (e.g.
-    "Join here" or "Click for more") while an entirely different URL is
-    hidden underneath it. Telethon reports this as a MessageEntityTextUrl
-    entity on the message; critically, the hidden URL never appears
-    anywhere in the message's plain text, so _scrub_remaining_links's
-    regex - which can only see literal characters - has nothing to match
-    and lets the anchor text straight through, still fully clickable and
-    still pointing at the source's own link.
-
-    This walks the message's real entities (independent of what the
-    visible text says) and swaps every masked link's anchor text for the
-    same fallback used for plain links elsewhere - so the hidden URL is
-    gone either way, exactly like a bare https://... link would be
-    treated.
-
-    Entity offsets/lengths are defined in UTF-16 code units per the
-    Telegram Bot API / MTProto spec, not Python string indices (which are
-    per code point) - a message containing any character outside the
-    Basic Multilingual Plane (many emoji) before the link would otherwise
-    make the slice land on the wrong characters. Encoding to UTF-16 first
-    keeps the offsets valid.
-    """
-    if not text or not entities:
-        return text
-
-    masked = [e for e in entities if type(e).__name__ == "MessageEntityTextUrl"]
-    if not masked:
-        return text
-
-    replacement = fallback if fallback else ""
-    buf = text.encode("utf-16-le")
-    replacement_bytes = replacement.encode("utf-16-le")
-    # Rightmost-first so replacing one span doesn't shift the byte offsets
-    # of spans still waiting to be processed.
-    for e in sorted(masked, key=lambda e: e.offset, reverse=True):
-        start = e.offset * 2
-        end = start + e.length * 2
-        if start < 0 or end > len(buf) or start > end:
-            continue
-        buf = buf[:start] + replacement_bytes + buf[end:]
-    return buf.decode("utf-16-le", errors="ignore")
+    return text
 
 
 def _rule_replacement_config(rule: RepostRule, dest: Channel) -> tuple[dict[str, str], str | None]:
@@ -120,12 +72,11 @@ def _rule_replacement_config(rule: RepostRule, dest: Channel) -> tuple[dict[str,
     fallback link from replacements_json, scoped the same way this always
     has been (a rule-wide "default" mapping, or an older per-destination-
     keyed one for rules created before that existed). Shared by the
-    message-body replacement pass (_apply_replacements) and the inline
+    message-body renderer (_render_repost_content) and the inline
     source-button URL translator (_build_source_buttons) below, so a
-    mapping or default link set once in the UI applies identically to
-    both - a source's own link gets replaced the same way whether it
-    showed up as plain text, a masked "text formatted as a link", or a
-    button.
+    mapping or default link set once in the UI applies identically
+    everywhere a source's own link could show up - plain text, a masked
+    "text formatted as a link", or a button.
     """
     mapping: dict[str, str] = {}
     fallback: str | None = None
@@ -140,70 +91,116 @@ def _rule_replacement_config(rule: RepostRule, dest: Channel) -> tuple[dict[str,
     return mapping, fallback
 
 
-def _apply_replacements(text: str | None, entities, rule: RepostRule, dest: Channel) -> str | None:
-    """Swap the source channel's links/usernames for the operator's own.
+def _render_repost_content(text: str | None, entities, rule: RepostRule, dest: Channel) -> str | None:
+    """Build the final HTML-formatted text/caption for a repost.
 
-    Three layers, in order:
-    1. Masked-link stripping (_strip_masked_links) - has to run FIRST and
-       against the untouched original text, since it relies on entity
-       offsets that are only valid before any other substitution shifts
-       the text around.
-    2. Explicit "old -> new" pairs configured on the rule (via the bot's
-       Forwarding UI, or hand-edited on an older rule) - exact substring
-       match.
-    3. A mandatory scrub pass (_scrub_remaining_links) that catches every
-       plain link or @mention still left afterward and replaces it with
-       the rule's configured fallback link/username, or strips it if no
-       fallback is set. This always runs, even if the rule has no
-       replacements configured at all - the source's own link or username
-       must never be posted as-is, one way or another.
+    Two things happen, working directly off the ORIGINAL text/entities
+    (not a previously-mutated copy), since masked-link handling needs
+    entity offsets that are only valid before anything else shifts the
+    text around:
 
-    IMPORTANT: step 3's scrub pass has to run over the WHOLE text (that's
-    what guarantees a link nobody explicitly listed still gets caught), but
-    that means it would also catch and re-replace whatever step 2 just
-    inserted whenever the "new" value is itself a link or @mention - which
-    it almost always is (an operator's own channel link/username). Left
-    unguarded, a specific "old -> new" replacement would get immediately
-    undone by the scrub pass right after being applied. To prevent that,
-    each replacement is swapped in as an inert placeholder token first (one
-    that can't match a link/mention regex), the scrub pass runs against
-    that safely-placeholdered text, and the real replacement values are
-    substituted back in only afterward.
+    1. Any "text formatted as a link" (Telegram's own formatting option;
+       Telethon reports it as a MessageEntityTextUrl entity) from the
+       source is preserved AS a link in the output - same visible anchor
+       text, but re-pointed at this rule's specific replacement for that
+       exact hidden URL, or its default/fallback link if no specific one
+       is configured - instead of being unmasked into plain fallback
+       text. This is what makes a reposted "Join here"-style link still
+       *look* and *behave* like a real link at the destination, exactly
+       like the source formatted it, just pointing at the operator's own
+       channel instead of the source's. A masked link with nothing to
+       replace it with (no mapping, no fallback) has its anchor text
+       removed entirely, same as an unmatched plain link already was.
+    2. Every OTHER stretch of text (outside any masked link) gets the
+       rule's explicit "old -> new" replacements applied, then a scrub
+       pass that replaces/removes any plain https://... link or @mention
+       still left over - unchanged from the original text-only pipeline,
+       just now confined to the non-masked-link stretches so it can't
+       accidentally reprocess an anchor text that already got its own,
+       more precise treatment in step 1.
+
+    The whole thing is assembled and returned as an HTML string - callers
+    MUST send it with parse_mode=ParseMode.HTML (this bot's own default
+    parse mode already is HTML, but call sites set it explicitly so that
+    dependency is obvious rather than implicit). Every non-link character
+    is HTML-escaped as it's copied across, so a "<" or "&" that happened
+    to be in the source text can no longer break the send - previously
+    the raw text was passed straight through even though the bot's
+    default parse mode was already HTML, which would have made Telegram
+    reject the whole send if the source text ever contained either
+    character.
+
+    Entity offsets/lengths are UTF-16 code units per the Telegram Bot API
+    / MTProto spec, not Python string (code point) indices - this
+    operates on a UTF-16 encoded copy of the text for that reason.
     """
     if not text:
         return text
 
     mapping, fallback = _rule_replacement_config(rule, dest)
 
-    text = _strip_masked_links(text, entities, fallback)
+    masked = sorted(
+        (e for e in (entities or []) if type(e).__name__ == "MessageEntityTextUrl"),
+        key=lambda e: e.offset,
+    )
 
-    placeholders: dict[str, str] = {}
-    for i, (old, new) in enumerate(mapping.items()):
-        if not old:
+    buf = text.encode("utf-16-le")
+
+    def _render_plain(raw: bytes) -> str:
+        segment = raw.decode("utf-16-le", errors="ignore")
+        placeholders: dict[str, str] = {}
+        for i, (old, new) in enumerate(mapping.items()):
+            if not old:
+                continue
+            token = f"\x00REPL{i}\x00"
+            placeholders[token] = new
+            segment = segment.replace(old, token)
+        segment = _scrub_links(segment, fallback)
+        for token, new in placeholders.items():
+            segment = segment.replace(token, new)
+        return html_lib.escape(segment, quote=True)
+
+    parts: list[str] = []
+    cursor = 0
+    for e in masked:
+        start = e.offset * 2
+        end = start + e.length * 2
+        if start < cursor or end > len(buf) or start > end:
+            # Overlapping/out-of-range entity (shouldn't normally happen) -
+            # skip it rather than risk corrupting the buffer.
             continue
-        token = f"\x00REPL{i}\x00"
-        placeholders[token] = new
-        text = text.replace(old, token)
 
-    text = _scrub_remaining_links(text, fallback)
+        parts.append(_render_plain(buf[cursor:start]))
 
-    for token, new in placeholders.items():
-        text = text.replace(token, new)
+        anchor_text = buf[start:end].decode("utf-16-le", errors="ignore")
+        new_url = _translate_button_url(e.url, mapping, fallback)
+        if new_url:
+            href = html_lib.escape(new_url, quote=True)
+            label = html_lib.escape(anchor_text, quote=True)
+            parts.append(f'<a href="{href}">{label}</a>')
+        # else: drop the anchor text - nothing safe to point it at, so it
+        # doesn't survive into the repost (matches how an unmatched plain
+        # link is already stripped rather than left dangling).
 
-    return text
+        cursor = end
+
+    parts.append(_render_plain(buf[cursor:]))
+
+    return "".join(parts).strip()
 
 
 def _coerce_button_url(value: str) -> str | None:
     """Turn whatever a rule's specific replacement value or default/
     fallback link is stored as (a full https:// URL, a tg:// deep link, an
     "@username", a bare "t.me/..." link, or a bare username typed with
-    neither) into a URL actually usable on a Telegram inline button - the
-    Bot API rejects a button whose url isn't a real URL, so a bare
-    "@mychannel" (perfectly valid as inline *text*, which is all the other
-    replacement paths ever needed until now) would otherwise make the
+    neither) into a URL actually usable on a Telegram inline button or
+    masked-link href - the Bot API rejects a button/link whose target
+    isn't a real URL, so a bare "@mychannel" (perfectly valid as inline
+    *text*, which is all the other replacement paths ever needed before
+    buttons and masked links were handled too) would otherwise make the
     whole send fail. Returns None if the value can't be turned into
-    anything URL-shaped, so the caller can drop that button instead of
-    crashing the repost over it.
+    anything URL-shaped, so the caller can drop that button/link instead
+    of crashing the repost over it.
     """
     value = value.strip()
     if not value:
@@ -221,11 +218,13 @@ def _coerce_button_url(value: str) -> str | None:
 
 
 def _translate_button_url(url: str, mapping: dict[str, str], fallback: str | None) -> str | None:
-    """Resolve what a single source inline button's URL should become:
-    the rule's specific replacement for that exact URL if one is
-    configured, otherwise the rule's default/fallback link, otherwise
-    None (meaning: drop the button rather than forward the source's own
-    link) - the same precedence _apply_replacements uses for text."""
+    """Resolve what a single source link/button URL should become: the
+    rule's specific replacement for that exact URL if one is configured,
+    otherwise the rule's default/fallback link, otherwise None (meaning:
+    drop it rather than forward the source's own link) - the same
+    precedence used for plain text. Shared by masked-link resolution in
+    _render_repost_content and by source inline buttons in
+    _build_source_buttons."""
     candidate = mapping.get(url) or fallback
     if not candidate:
         return None
@@ -237,12 +236,12 @@ def _build_source_buttons(message, mapping: dict[str, str], fallback: str | None
     our channel" button a source attaches to its posts - with each
     button's underlying URL swapped through the exact same replacement
     mapping / default-link fallback used for the message body, instead of
-    either leaking the source's own link untouched or (the previous
-    behavior) silently dropping the button entirely regardless of what it
-    pointed to. A button whose URL isn't covered by a specific mapping and
-    has no default link configured is dropped - same "no fallback -> just
-    remove it" behavior _scrub_remaining_links already applies to a plain
-    link in text - rather than posted with the source's own link intact.
+    either leaking the source's own link untouched or silently dropping
+    the button entirely regardless of what it pointed to. A button whose
+    URL isn't covered by a specific mapping and has no default link
+    configured is dropped - same "no fallback -> just remove it" behavior
+    already applied to a plain link or masked link in text - rather than
+    posted with the source's own link intact.
 
     Non-URL buttons (callback/switch-inline/game/login/etc.) only make
     sense wired to the SOURCE's own bot and chat, so they're skipped
@@ -376,18 +375,24 @@ def _build_media_group(items: list[dict], caption: str | None) -> list:
     from raw downloaded bytes (BufferedInputFile) instead of Bot-API
     file_id strings - a repost has no such file_id to reuse, since the
     media was read from the source channel via Telethon, not uploaded by
-    an operator through this bot. Only the first item gets the caption,
-    per Telegram's rule that an album shows a single caption for the whole
-    group."""
+    an operator through this bot. Only the first item gets the caption
+    (per Telegram's rule that an album shows a single caption for the
+    whole group) and, since that caption is now HTML - see
+    _render_repost_content - only that first item is given
+    parse_mode=HTML too; the other items have no caption at all so it
+    would be meaningless there."""
     media = []
     for i, it in enumerate(items):
         cap = caption if i == 0 else None
         filename = "repost.mp4" if it["kind"] == "video" else "repost.jpg"
         buf = BufferedInputFile(it["bytes"], filename=filename)
+        kwargs: dict[str, Any] = {"media": buf, "caption": cap}
+        if cap is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
         if it["kind"] == "video":
-            media.append(InputMediaVideo(media=buf, caption=cap))
+            media.append(InputMediaVideo(**kwargs))
         else:
-            media.append(InputMediaPhoto(media=buf, caption=cap))
+            media.append(InputMediaPhoto(**kwargs))
     return media
 
 
@@ -426,7 +431,7 @@ async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rule
             if not dest:
                 continue
 
-            cleaned_text = _apply_replacements(text, entities, rule, dest)
+            cleaned_text = _render_repost_content(text, entities, rule, dest)
             context = {
                 "original_text": cleaned_text or "",
                 "source_title": source.title or "",
@@ -596,7 +601,7 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
             if not dest:
                 continue
 
-            cleaned_text = _apply_replacements(text, entities, rule, dest)
+            cleaned_text = _render_repost_content(text, entities, rule, dest)
 
             context = {
                 "original_text": cleaned_text or "",
@@ -617,6 +622,7 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
                         chat_id=dest.chat_id,
                         photo=BufferedInputFile(photo_bytes, filename="repost.jpg"),
                         caption=caption,
+                        parse_mode=ParseMode.HTML,
                         reply_markup=reply_markup,
                     )
                 elif video_bytes:
@@ -624,12 +630,14 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
                         chat_id=dest.chat_id,
                         video=BufferedInputFile(video_bytes, filename="repost.mp4"),
                         caption=caption,
+                        parse_mode=ParseMode.HTML,
                         reply_markup=reply_markup,
                     )
                 else:
                     sent = await bot.send_message(
                         chat_id=dest.chat_id,
                         text=caption or "",
+                        parse_mode=ParseMode.HTML,
                         reply_markup=reply_markup,
                         link_preview_options=_build_link_preview(rule),
                     )
