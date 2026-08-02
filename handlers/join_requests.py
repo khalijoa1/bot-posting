@@ -1,15 +1,24 @@
-"""Auto-approve channel join requests, based on each channel's setting, and
-DM the new subscriber the channel's configured welcome message.
+"""Auto-approve channel join requests, based on each channel's setting, DM
+the requester a pre-approval message the moment their request comes in, and
+DM them the welcome message once they're actually approved.
 
 For approval to fire, the channel must have "Approve new members" (join
 requests) turned on in Telegram, and the bot must be an admin there with
 permission to add/approve members - toggle the per-channel setting with
-/autoapprove. Set the welcome message when adding a channel (/add_channel).
+/autoapprove. Set the welcome message (and the optional pre-approval
+message) when adding a channel (/add_channel), or via /autoapprove's
+per-channel buttons at any time.
 
-Note: Telegram only lets a bot DM a user who has interacted with it before
-(e.g. pressed /start on the bot at some point). If the subscriber never has,
-the welcome DM will silently fail to send - this is a Telegram-side
-restriction, not something the bot can work around.
+Note on DMing: Telegram normally only lets a bot message a user who has
+interacted with it before (e.g. pressed /start). A chat_join_request is a
+specific, documented exception to that (Bot API 5.5+) - the moment someone
+submits a join request to a chat where this bot is an admin with the
+"Invite users" permission, the bot can message that user directly, even if
+they've never opened a chat with it before. That window lasts 24 hours
+from the request, or until any admin approves/declines it, whichever comes
+first - which is exactly what lets both the pre-approval message below AND
+the welcome message (sent right after approval, so still inside that same
+window) reach someone who's never pressed /start on the bot.
 
 Force-join: a channel can also require the requester to already belong to
 one or more OTHER channels/groups (configured via 🔒 Force-Join in the
@@ -80,6 +89,17 @@ async def handle_join_request(update: types.ChatJoinRequest) -> None:
     if not channel or not channel.auto_approve_members:
         return
 
+    # Pre-approval message: sent immediately on every join request to this
+    # channel, before approval happens (or before the force-join gate below
+    # even gets checked) - e.g. "Thanks for requesting to join, hang
+    # tight" or a rules/captcha notice. Best-effort: if it fails to send
+    # (e.g. the user has blocked the bot), that never blocks approval.
+    if channel.pre_approval_message:
+        try:
+            await update.bot.send_message(update.from_user.id, channel.pre_approval_message)
+        except Exception:
+            pass
+
     required = _parse_required(channel.required_join_json)
     if required:
         missing = await _missing_required(update.bot, update.from_user.id, required)
@@ -95,10 +115,8 @@ async def handle_join_request(update: types.ChatJoinRequest) -> None:
                     update.from_user.id, text, reply_markup=_force_join_kb(channel.id, missing)
                 )
             except Exception:
-                # Most common cause: the user has never started a chat with
-                # the bot, so Telegram won't let it initiate a DM. Their
-                # join request just stays pending until they do (or an
-                # operator approves it manually in Telegram).
+                # Rare: can still fail if the user blocked the bot, or the
+                # 24h/pending-request DM window has already closed.
                 pass
             return
 
