@@ -36,6 +36,17 @@ class Channel(Base):
     title: Mapped[str] = mapped_column(String(255))
     auto_approve_members: Mapped[bool] = mapped_column(Boolean, default=False)
     welcome_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Message sent immediately when someone submits a join request to this
+    # channel, BEFORE their request is approved (or before a force-join
+    # gate even gets checked) - e.g. "Thanks for requesting to join!" or a
+    # captcha/rules notice. Telegram allows a bot to DM a user the instant
+    # their join request arrives, even if they've never started a chat
+    # with the bot before - a chat_join_request itself counts as the
+    # qualifying interaction (Bot API 5.5+), for up to 24h from the
+    # request or until it's resolved by any admin. See
+    # handlers/join_requests.py:handle_join_request. None means no
+    # pre-approval message is sent.
+    pre_approval_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Force-subscribe: JSON list of {"identifier": "@channel_or_-100id",
     # "title": str|None, "link": "https://t.me/..."} that a user must already
     # belong to before their join request to THIS channel gets auto-approved.

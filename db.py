@@ -120,6 +120,13 @@ async def init_db() -> None:
         if chan_cols and "required_join_json" not in chan_cols:
             await conn.exec_driver_sql("ALTER TABLE channels ADD COLUMN required_join_json TEXT")
 
+        # Simple additive column: message DMed to a user the moment their
+        # join request comes in, before approval happens (see
+        # handlers/join_requests.py). NULL means no pre-approval message is
+        # sent - existing channels keep behaving exactly as before.
+        if chan_cols and "pre_approval_message" not in chan_cols:
+            await conn.exec_driver_sql("ALTER TABLE channels ADD COLUMN pre_approval_message TEXT")
+
         await conn.run_sync(Base.metadata.create_all)
 
         # One-time data cleanup: handlers/sources.py's "Add Source" flow
