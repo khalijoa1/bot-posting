@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -7,12 +8,19 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from aiogram import Bot
-from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
+from aiogram.types import (
+    BufferedInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputMediaVideo,
+    LinkPreviewOptions,
+)
 from sqlalchemy import select
 from sqlalchemy import or_ as _sa_or  # noqa: F401 - kept for compatibility, unused after the identifier-matching fix below
 
 from db import session
-from models import Channel, ContentType, Post, PostStatus, PostTarget, RepostRule, SourceChannel
+from models import Channel, ContentType, Post, PostMediaItem, PostStatus, PostTarget, RepostRule, SourceChannel
 
 logger = logging.getLogger(__name__)
 
@@ -140,96 +148,210 @@ def _build_link_preview(rule: RepostRule) -> LinkPreviewOptions | None:
     return None
 
 
-async def handle_incoming_message(bot: Bot, event) -> None:
-    """Process a Telethon NewMessage event and repost it to matching destinations.
+# ---------------------------------------------------------------------------
+# Album (media-group) buffering.
+#
+# Telegram delivers a multi-photo/video source post as a SEPARATE Telethon
+# NewMessage event per item, all sharing the same `message.grouped_id` -
+# exactly analogous to aiogram's own media_group_id on the composing side
+# (see handlers/common.py:collect_album_item, which does the same thing for
+# an operator's own uploads). Without this buffering, each item was being
+# looked up and reposted independently the instant its own event fired,
+# which is exactly the reported bug: "if the source posts an album it
+# should do the same on the rule channel" - instead the destination got N
+# separate single-item messages instead of one grouped album.
+#
+# Keyed by (chat_id, grouped_id) since Telethon's grouped_id integer is
+# only guaranteed unique within a single chat, not globally.
+# ---------------------------------------------------------------------------
 
-    `bot` is the aiogram Bot, used to post into destination channels (where it's
-    an admin). `event` is a telethon events.NewMessage.Event - the userbot
-    connection is only used to *read* the source channel; posting is always
-    done through the regular Bot API so destination behaviour (permissions,
-    formatting) matches the rest of the app.
-    """
-    message = event.message
-    chat = await event.get_chat()
-    if chat is None:
-        logger.info("repost-debug: event.get_chat() returned None for chat_id=%s - skipping", event.chat_id)
-        return
+_album_buffers: dict[tuple[int, int], list[dict]] = {}
+_album_tasks: dict[tuple[int, int], asyncio.Task] = {}
+# A little more generous than handlers/common.py's 0.9s debounce: this path
+# also downloads full media bytes for every item before buffering it
+# (common.py only buffers a small file_id string), so slower items get a
+# bit more room to land before the album is finalized and sent.
+_ALBUM_DEBOUNCE_SECONDS = 1.5
 
-    identifier_str = str(event.chat_id)
-    username = getattr(chat, "username", None) or ""
 
-    # Match against every form a source's identifier could have been saved
-    # in: the numeric chat id, the bare username Telethon reports (no "@"),
-    # or an "@"-prefixed username. Previously this only checked the numeric
-    # id and the bare username - but handlers/sources.py's "Add Source" flow
-    # (and the /add_source command) never strip a leading "@" from what's
-    # typed, and the README tells operators to enter "a public @username".
-    # A source added exactly that way (e.g. "@somechannel") had its
-    # identifier stored WITH the "@", which never matched the bare
-    # "somechannel" Telethon returns here - so every post from that channel
-    # was silently ignored, while channels added by numeric id or without
-    # the "@" worked fine. This is almost certainly why forwarding "worked
-    # for some channels but not others."
-    candidates = {identifier_str}
-    if username:
-        candidates.add(username)
-        candidates.add(f"@{username}")
+def _build_media_group(items: list[dict], caption: str | None) -> list:
+    """Same idea as handlers/compose.py's own _build_media_group, but built
+    from raw downloaded bytes (BufferedInputFile) instead of Bot-API
+    file_id strings - a repost has no such file_id to reuse, since the
+    media was read from the source channel via Telethon, not uploaded by
+    an operator through this bot. Only the first item gets the caption,
+    per Telegram's rule that an album shows a single caption for the whole
+    group."""
+    media = []
+    for i, it in enumerate(items):
+        cap = caption if i == 0 else None
+        filename = "repost.mp4" if it["kind"] == "video" else "repost.jpg"
+        buf = BufferedInputFile(it["bytes"], filename=filename)
+        if it["kind"] == "video":
+            media.append(InputMediaVideo(media=buf, caption=cap))
+        else:
+            media.append(InputMediaPhoto(media=buf, caption=cap))
+    return media
 
-    # TEMPORARY diagnostic logging - trace every incoming message through the
-    # matching pipeline so a "still not forwarding" report can be root-caused
-    # from the logs instead of guessed at. Safe to remove once forwarding is
-    # confirmed working end-to-end.
-    logger.info(
-        "repost-debug: incoming message chat_id=%s username=%r candidates=%s",
-        identifier_str, username, sorted(candidates),
-    )
+
+async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rules: list[RepostRule]) -> None:
+    """Repost a complete, buffered source album as one Telegram album per
+    matching rule, via bot.send_media_group - mirrors _repost_single below,
+    but for the multi-item case."""
+    text = next((it["caption"] for it in items if it["caption"]), "") or None
 
     async with session() as s:
-        q = select(SourceChannel).where(SourceChannel.identifier.in_(candidates))
-        res = await s.execute(q)
-        source = res.scalars().first()
-        if not source:
-            all_sources_q = select(SourceChannel.identifier)
-            all_sources_res = await s.execute(all_sources_q)
-            known = [row[0] for row in all_sources_res.all()]
-            logger.info(
-                "repost-debug: no SourceChannel matched candidates=%s - known identifiers in DB=%s",
-                sorted(candidates), known,
-            )
+        post = Post(
+            owner_user_id=0,
+            content_type=ContentType.ALBUM,
+            text=text,
+            status=PostStatus.SENT,
+            created_at=datetime.utcnow(),
+        )
+        s.add(post)
+        await s.flush()
+
+        for i, it in enumerate(items):
+            # file_id is left empty here - unlike an operator-composed
+            # album (handlers/compose.py), a repost's media came in as raw
+            # bytes from Telethon, so there's no Bot-API file_id to record
+            # that could actually be reused later. This row still exists so
+            # /myposts-style bookkeeping reflects "an album with N items".
+            s.add(PostMediaItem(post_id=post.id, position=i, media_type=it["kind"], file_id=""))
+        await s.flush()
+
+        for rule in rules:
+            qch = select(Channel).where(Channel.id == rule.destination_channel_id)
+            rch = await s.execute(qch)
+            dest = rch.scalars().first()
+            if not dest:
+                continue
+
+            cleaned_text = _apply_replacements(text, rule, dest)
+            context = {
+                "original_text": cleaned_text or "",
+                "source_title": source.title or "",
+                "source_username": source.identifier,
+            }
+            caption = _render_template(rule.caption_template, context) if rule.caption_template else cleaned_text
+            caption = _apply_prefix(caption, rule)
+            # Telegram's send_media_group has no reply_markup parameter at
+            # all, so a rule's configured inline button (if any) simply
+            # can't apply to an album repost - that's a Telegram platform
+            # limitation, not something skipped by mistake here.
+            media = _build_media_group(items, caption or None)
+
+            try:
+                sent = await bot.send_media_group(chat_id=dest.chat_id, media=media)
+                first, rest = sent[0], sent[1:]
+                pt = PostTarget(
+                    post_id=post.id,
+                    channel_id=dest.id,
+                    message_id=first.message_id,
+                    extra_message_ids=json.dumps([m.message_id for m in rest]) if rest else None,
+                    sent_at=datetime.utcnow(),
+                )
+                s.add(pt)
+                await s.commit()
+                logger.info(
+                    "repost-debug: successfully reposted ALBUM (%d items) into dest channel id=%s chat_id=%s title=%r",
+                    len(items), dest.id, dest.chat_id, dest.title,
+                )
+            except Exception:
+                logger.exception("Failed to repost album into channel %s", dest.title)
+                pt = PostTarget(post_id=post.id, channel_id=dest.id, message_id=None, sent_at=None)
+                s.add(pt)
+                await s.commit()
+                continue
+
+        auto_candidates = [r.auto_delete_seconds for r in rules if r.auto_delete_seconds]
+        auto_seconds = min(auto_candidates) if auto_candidates else None
+        if auto_seconds:
+            post.auto_delete_seconds = auto_seconds
+            post.delete_at = datetime.utcnow() + timedelta(seconds=auto_seconds)
+            await s.commit()
+
+
+async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list[RepostRule]) -> None:
+    """Buffer one item of a source album and, once no further item has
+    arrived for _ALBUM_DEBOUNCE_SECONDS, repost the whole thing as one
+    album via _repost_album - instead of this item going out on its own
+    the instant its own NewMessage event fires."""
+    message = event.message
+    key = (event.chat_id, message.grouped_id)
+
+    kind: str | None = None
+    file_bytes: bytes | None = None
+    if message.photo:
+        kind = "photo"
+        downloaded = await message.download_media(bytes)
+        file_bytes = downloaded if isinstance(downloaded, (bytes, bytearray)) else None
+    elif message.video:
+        kind = "video"
+        downloaded = await message.download_media(bytes)
+        file_bytes = downloaded if isinstance(downloaded, (bytes, bytearray)) else None
+
+    if kind is None or file_bytes is None:
+        # Some other media type inside the album this app doesn't support
+        # reposting (e.g. a document/audio) - drop just this one item
+        # rather than losing the whole album over it.
+        logger.info(
+            "repost-debug: album item chat_id=%s grouped_id=%s message_id=%s has no supported photo/video - skipped",
+            event.chat_id, message.grouped_id, message.id,
+        )
+        return
+
+    items = _album_buffers.setdefault(key, [])
+    items.append({"kind": kind, "bytes": file_bytes, "caption": (message.message or "").strip(), "id": message.id})
+
+    existing = _album_tasks.get(key)
+    if existing and not existing.done():
+        existing.cancel()
+
+    async def _finalize():
+        try:
+            await asyncio.sleep(_ALBUM_DEBOUNCE_SECONDS)
+        except asyncio.CancelledError:
             return
-
-        logger.info("repost-debug: matched source id=%s identifier=%r title=%r", source.id, source.identifier, source.title)
-
-        q2 = select(RepostRule).where(RepostRule.source_channel_id == source.id)
-        res2 = await s.execute(q2)
-        rules = res2.scalars().all()
-        if not rules:
-            logger.info("repost-debug: source id=%s matched but has NO RepostRule rows - nothing to forward to", source.id)
+        collected = _album_buffers.pop(key, [])
+        _album_tasks.pop(key, None)
+        if not collected:
             return
+        # Telethon can deliver album items very slightly out of order;
+        # message id order matches the order they were actually posted in.
+        collected.sort(key=lambda it: it["id"])
+        logger.info(
+            "repost-debug: album chat_id=%s grouped_id=%s complete with %d item(s) - reposting",
+            event.chat_id, message.grouped_id, len(collected),
+        )
+        try:
+            await _repost_album(bot, collected, source, rules)
+        except Exception:
+            logger.exception("Failed to finalize/repost album chat_id=%s grouped_id=%s", event.chat_id, message.grouped_id)
 
-        logger.info("repost-debug: source id=%s has %d rule(s) - proceeding to repost", source.id, len(rules))
+    _album_tasks[key] = asyncio.create_task(_finalize())
 
-        text = message.message or None
-        photo_bytes: bytes | None = None
-        video_bytes: bytes | None = None
-        if message.photo:
-            downloaded = await message.download_media(bytes)
-            photo_bytes = downloaded if isinstance(downloaded, (bytes, bytearray)) else None
-        elif message.video:
-            # Previously only photos were downloaded here - a video source
-            # post fell through to the plain-text branch below with no
-            # media at all, silently dropping the video and reposting the
-            # caption alone. Videos are handled the same way as photos now.
-            downloaded = await message.download_media(bytes)
-            video_bytes = downloaded if isinstance(downloaded, (bytes, bytearray)) else None
 
-        if photo_bytes:
-            content_type = ContentType.PHOTO
-        elif video_bytes:
-            content_type = ContentType.VIDEO
-        else:
-            content_type = ContentType.TEXT
+async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[RepostRule]) -> None:
+    """Repost one non-album message - the original per-message send path."""
+    text = message.message or None
+    photo_bytes: bytes | None = None
+    video_bytes: bytes | None = None
+    if message.photo:
+        downloaded = await message.download_media(bytes)
+        photo_bytes = downloaded if isinstance(downloaded, (bytes, bytearray)) else None
+    elif message.video:
+        downloaded = await message.download_media(bytes)
+        video_bytes = downloaded if isinstance(downloaded, (bytes, bytearray)) else None
 
+    if photo_bytes:
+        content_type = ContentType.PHOTO
+    elif video_bytes:
+        content_type = ContentType.VIDEO
+    else:
+        content_type = ContentType.TEXT
+
+    async with session() as s:
         post = Post(
             owner_user_id=0,  # system-owned: created by the userbot, not a specific operator chat
             content_type=content_type,
@@ -247,12 +369,6 @@ async def handle_incoming_message(bot: Bot, event) -> None:
             if not dest:
                 continue
 
-            # Scrub the source's own text FIRST, before it's dropped into a
-            # caption_template - that way an operator-authored template
-            # (e.g. their own "Join us: https://t.me/mychannel" footer)
-            # never gets clipped by the same pass that's removing the
-            # *source's* links, since it never touches that literal
-            # template text at all.
             cleaned_text = _apply_replacements(text, rule, dest)
 
             context = {
@@ -304,3 +420,79 @@ async def handle_incoming_message(bot: Bot, event) -> None:
             post.auto_delete_seconds = auto_seconds
             post.delete_at = datetime.utcnow() + timedelta(seconds=auto_seconds)
             await s.commit()
+
+
+async def handle_incoming_message(bot: Bot, event) -> None:
+    """Process a Telethon NewMessage event and repost it to matching destinations.
+
+    `bot` is the aiogram Bot, used to post into destination channels (where it's
+    an admin). `event` is a telethon events.NewMessage.Event - the userbot
+    connection is only used to *read* the source channel; posting is always
+    done through the regular Bot API so destination behaviour (permissions,
+    formatting) matches the rest of the app.
+
+    If the message is part of a source album (message.grouped_id set), it's
+    handed off to the buffering path (_handle_album_item) instead of being
+    reposted immediately on its own - see the "Album (media-group)
+    buffering" section above for why.
+    """
+    message = event.message
+    chat = await event.get_chat()
+    if chat is None:
+        logger.info("repost-debug: event.get_chat() returned None for chat_id=%s - skipping", event.chat_id)
+        return
+
+    identifier_str = str(event.chat_id)
+    username = getattr(chat, "username", None) or ""
+
+    # Match against every form a source's identifier could have been saved
+    # in: the numeric chat id, the bare username Telethon reports (no "@"),
+    # or an "@"-prefixed username.
+    candidates = {identifier_str}
+    if username:
+        candidates.add(username)
+        candidates.add(f"@{username}")
+
+    # TEMPORARY diagnostic logging - trace every incoming message through the
+    # matching pipeline so a "still not forwarding" report can be root-caused
+    # from the logs instead of guessed at. Safe to remove once forwarding is
+    # confirmed working end-to-end.
+    logger.info(
+        "repost-debug: incoming message chat_id=%s username=%r candidates=%s grouped_id=%s",
+        identifier_str, username, sorted(candidates), getattr(message, "grouped_id", None),
+    )
+
+    async with session() as s:
+        q = select(SourceChannel).where(SourceChannel.identifier.in_(candidates))
+        res = await s.execute(q)
+        source = res.scalars().first()
+        if not source:
+            all_sources_q = select(SourceChannel.identifier)
+            all_sources_res = await s.execute(all_sources_q)
+            known = [row[0] for row in all_sources_res.all()]
+            logger.info(
+                "repost-debug: no SourceChannel matched candidates=%s - known identifiers in DB=%s",
+                sorted(candidates), known,
+            )
+            return
+
+        logger.info("repost-debug: matched source id=%s identifier=%r title=%r", source.id, source.identifier, source.title)
+
+        q2 = select(RepostRule).where(RepostRule.source_channel_id == source.id)
+        res2 = await s.execute(q2)
+        rules = res2.scalars().all()
+        if not rules:
+            logger.info("repost-debug: source id=%s matched but has NO RepostRule rows - nothing to forward to", source.id)
+            return
+
+        logger.info("repost-debug: source id=%s has %d rule(s) - proceeding to repost", source.id, len(rules))
+
+    # source/rules are plain ORM objects loaded with expire_on_commit=False
+    # (see db.py), so they stay usable after the session above closes -
+    # needed here since the album path defers sending until the debounce
+    # timer fires, well after this function itself has returned.
+    if getattr(message, "grouped_id", None):
+        await _handle_album_item(bot, event, source, rules)
+        return
+
+    await _repost_single(bot, message, source, rules)
