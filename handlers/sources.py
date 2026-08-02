@@ -5,6 +5,8 @@ The original /add_source /list_sources /remove_source commands are kept
 for backward compatibility, but the buttons below are the easy path: no
 need to remember chat ids or command syntax, just tap through.
 """
+import re
+
 from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
@@ -24,22 +26,41 @@ class SourceUIState(StatesGroup):
     title = State()
 
 
+# Matches a t.me (or telegram.me) share link, with or without scheme/www,
+# capturing just the path after the domain (e.g. "bnnkenya" out of
+# "https://t.me/bnnkenya", or "joinchat/xyz" for a private invite link,
+# which is left as-is since it isn't a resolvable username anyway).
+_TME_URL_RE = re.compile(r"^(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/", re.IGNORECASE)
+
+
 def _normalize_identifier(raw: str) -> str:
-    """Strip a leading "@" from a typed username so what's stored always
-    matches the bare form Telethon reports on incoming messages (its
-    `chat.username` attribute never includes the "@"). Numeric chat ids
+    """Reduce whatever an operator pastes down to the bare form Telethon
+    reports on incoming messages (its `chat.username` attribute is always
+    the bare username, never a "@" prefix or a t.me URL). Numeric chat ids
     (e.g. -1001234567890) pass through unchanged.
 
-    Without this, a source added exactly the way the README instructs -
-    "a public @username" - got stored WITH the "@" and never matched an
-    incoming post's source channel, so that channel silently never
-    forwarded anything while channels added by numeric id or without the
-    "@" worked fine. services/reposter.py's matching was also hardened to
-    accept either form, but normalizing on the way in here means newly
-    added sources are consistent by construction.
+    Two things get stripped here, both discovered from real production
+    reports of "source added, nothing ever forwards":
+    1. A leading "@" - the README tells operators to enter "a public
+       @username", which got stored WITH the "@" and never matched.
+    2. A full https://t.me/<username> link (or bare t.me/<username>,
+       or telegram.me/...) - pasting the channel's share link (arguably
+       the most natural thing to paste, e.g. from Telegram's own "Copy
+       Link" button) stored the entire URL, which also never matched
+       either the bare username or the "@" form.
+    services/reposter.py's matching was also hardened to accept the
+    "@"-prefixed form, but normalizing on the way in here means newly
+    added sources are consistent by construction regardless of which of
+    these three forms the operator pasted.
     """
     raw = raw.strip()
-    return raw[1:].strip() if raw.startswith("@") else raw
+    raw = _TME_URL_RE.sub("", raw).strip()
+    raw = raw[1:].strip() if raw.startswith("@") else raw
+    # A t.me link may still have a trailing slash or query string
+    # (e.g. "t.me/bnnkenya/123" for a specific post, or "?start=..."):
+    # keep only the channel-name segment itself.
+    raw = raw.split("?", 1)[0].split("/", 1)[0].strip()
+    return raw
 
 
 def _cancel_kb():
