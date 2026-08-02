@@ -187,13 +187,23 @@ def _build_link_preview(rule: RepostRule) -> LinkPreviewOptions | None:
 # only guaranteed unique within a single chat, not globally.
 # ---------------------------------------------------------------------------
 
-_album_buffers: dict[tuple[int, int], list[dict]] = {}
+# Each buffered entry is (message_id, caption, kind, download_task) - the
+# download itself is kicked off and stored as a Task the moment the item is
+# registered (see _handle_album_item), NOT awaited to completion first.
+# That decoupling is what lets the debounce timer below track "did every
+# item arrive in time" independently of "how long did each item's own
+# download take" - see the long comment in _handle_album_item for the bug
+# this fixes.
+_album_buffers: dict[tuple[int, int], list[tuple[int, str, str, "asyncio.Future"]]] = {}
 _album_tasks: dict[tuple[int, int], asyncio.Task] = {}
-# A little more generous than handlers/common.py's 0.9s debounce: this path
-# also downloads full media bytes for every item before buffering it
-# (common.py only buffers a small file_id string), so slower items get a
-# bit more room to land before the album is finalized and sent.
-_ALBUM_DEBOUNCE_SECONDS = 1.5
+# A little more generous than handlers/common.py's 0.9s debounce: source
+# albums can include large videos whose download can itself take a couple
+# of seconds, so a slightly wider window reduces how often a genuinely
+# fast burst of items still ends up split by the timer alone (downloads
+# finishing late no longer cause a split at all now - see above - but a
+# wider window still means fewer, larger _finalize batches instead of
+# many tiny ones when items trickle in close to the boundary).
+_ALBUM_DEBOUNCE_SECONDS = 2.5
 
 
 def _build_media_group(items: list[dict], caption: str | None) -> list:
@@ -302,18 +312,7 @@ async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list
     message = event.message
     key = (event.chat_id, message.grouped_id)
 
-    kind: str | None = None
-    file_bytes: bytes | None = None
-    if message.photo:
-        kind = "photo"
-        downloaded = await message.download_media(bytes)
-        file_bytes = downloaded if isinstance(downloaded, (bytes, bytearray)) else None
-    elif message.video:
-        kind = "video"
-        downloaded = await message.download_media(bytes)
-        file_bytes = downloaded if isinstance(downloaded, (bytes, bytearray)) else None
-
-    if kind is None or file_bytes is None:
+    if not (message.photo or message.video):
         # Some other media type inside the album this app doesn't support
         # reposting (e.g. a document/audio) - drop just this one item
         # rather than losing the whole album over it.
@@ -323,8 +322,26 @@ async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list
         )
         return
 
-    items = _album_buffers.setdefault(key, [])
-    items.append({"kind": kind, "bytes": file_bytes, "caption": (message.message or "").strip(), "id": message.id})
+    # Register this item and (re)start the debounce timer BEFORE awaiting
+    # its download - not after, like an earlier version of this function
+    # did. Downloads take a highly variable amount of time (a large video
+    # can take several seconds longer than a small photo), and awaiting
+    # the download first meant a slow item could still be mid-download
+    # when a FASTER sibling item's debounce timer fired: that sibling's
+    # timer had no way to know the slow item existed yet, so it finalized
+    # and sent an incomplete album, and the slow item then landed moments
+    # later as its own separate post - "posting separately in some
+    # instances" was near-guaranteed to be download-speed-dependent,
+    # exactly matching what was reported. Registering the download as its
+    # own task immediately, before any await, means every item that
+    # actually arrived within the debounce window is counted regardless
+    # of how long its own download subsequently takes - _finalize below
+    # then waits for every registered download to actually finish before
+    # building the album, howeverlong that takes.
+    download_task = asyncio.ensure_future(message.download_media(bytes))
+    pending = _album_buffers.setdefault(key, [])
+    pending.append((message.id, (message.message or "").strip(),
+                     "video" if message.video else "photo", download_task))
 
     existing = _album_tasks.get(key)
     if existing and not existing.done():
@@ -335,8 +352,25 @@ async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list
             await asyncio.sleep(_ALBUM_DEBOUNCE_SECONDS)
         except asyncio.CancelledError:
             return
-        collected = _album_buffers.pop(key, [])
+        entries = _album_buffers.pop(key, [])
         _album_tasks.pop(key, None)
+        if not entries:
+            return
+
+        collected: list[dict] = []
+        for msg_id, caption, kind, task in entries:
+            try:
+                downloaded = await task
+            except Exception:
+                logger.exception(
+                    "repost-debug: album item chat_id=%s grouped_id=%s message_id=%s failed to download - skipped",
+                    event.chat_id, message.grouped_id, msg_id,
+                )
+                continue
+            if not isinstance(downloaded, (bytes, bytearray)):
+                continue
+            collected.append({"kind": kind, "bytes": downloaded, "caption": caption, "id": msg_id})
+
         if not collected:
             return
         # Telethon can deliver album items very slightly out of order;
