@@ -23,12 +23,14 @@ from handlers import (
     repost_rules,
     join_requests,
     broadcast,
+    group_messages,
     moderation,
 )
 from middleware import AllowlistMiddleware
 from services.scheduler import run_scheduler_loop, run_post_send_loop
 from services.stats import run_channel_stats_loop
 from services.telethon_client import run_userbot
+from services.recurring import run_recurring_messages_loop
 
 logging.basicConfig(level=logging.INFO)
 
@@ -57,6 +59,13 @@ async def main() -> None:
     dp.include_router(repost_rules.router)
     dp.include_router(join_requests.router)
     dp.include_router(broadcast.router)
+    # group_messages.router has a `F.new_chat_members` handler that must be
+    # included BEFORE moderation.router - moderation.router's broad "any
+    # group message" catch-all would otherwise also match a "new member
+    # joined" service message, and aiogram stops walking further routers
+    # once an earlier one's handler matches, so ordering here decides
+    # which one actually gets it.
+    dp.include_router(group_messages.router)
     # moderation.router has a broad "any group message" catch-all handler,
     # so it must be included LAST - otherwise it would swallow messages
     # (including the operator's own commands sent inside a group) before
@@ -65,11 +74,13 @@ async def main() -> None:
 
     # Background jobs: auto-delete of sent posts, sending of due scheduled posts,
     # the optional Telethon userbot that watches source channels for reposting,
-    # and periodic channel member-count snapshots for /analytics growth stats.
+    # periodic channel member-count snapshots for /analytics growth stats, and
+    # sending due recurring group messages.
     asyncio.create_task(run_scheduler_loop(bot))
     asyncio.create_task(run_post_send_loop(bot))
     asyncio.create_task(run_userbot(bot))
     asyncio.create_task(run_channel_stats_loop(bot))
+    asyncio.create_task(run_recurring_messages_loop(bot))
 
     try:
         await dp.start_polling(bot)
