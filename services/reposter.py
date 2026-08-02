@@ -8,7 +8,8 @@ from typing import Any
 
 from aiogram import Bot
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
-from sqlalchemy import or_, select
+from sqlalchemy import select
+from sqlalchemy import or_ as _sa_or  # noqa: F401 - kept for compatibility, unused after the identifier-matching fix below
 
 from db import session
 from models import Channel, ContentType, Post, PostStatus, PostTarget, RepostRule, SourceChannel
@@ -156,10 +157,25 @@ async def handle_incoming_message(bot: Bot, event) -> None:
     identifier_str = str(event.chat_id)
     username = getattr(chat, "username", None) or ""
 
+    # Match against every form a source's identifier could have been saved
+    # in: the numeric chat id, the bare username Telethon reports (no "@"),
+    # or an "@"-prefixed username. Previously this only checked the numeric
+    # id and the bare username - but handlers/sources.py's "Add Source" flow
+    # (and the /add_source command) never strip a leading "@" from what's
+    # typed, and the README tells operators to enter "a public @username".
+    # A source added exactly that way (e.g. "@somechannel") had its
+    # identifier stored WITH the "@", which never matched the bare
+    # "somechannel" Telethon returns here - so every post from that channel
+    # was silently ignored, while channels added by numeric id or without
+    # the "@" worked fine. This is almost certainly why forwarding "worked
+    # for some channels but not others."
+    candidates = {identifier_str}
+    if username:
+        candidates.add(username)
+        candidates.add(f"@{username}")
+
     async with session() as s:
-        q = select(SourceChannel).where(
-            or_(SourceChannel.identifier == identifier_str, SourceChannel.identifier == username)
-        )
+        q = select(SourceChannel).where(SourceChannel.identifier.in_(candidates))
         res = await s.execute(q)
         source = res.scalars().first()
         if not source:
