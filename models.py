@@ -236,3 +236,30 @@ class ModeratedGroup(Base):
         Enum(SpamAction, name="spam_action"), default=SpamAction.WARN_MUTE
     )
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class BroadcastUser(Base):
+    """One row per unique person who has ever submitted a join request to
+    any of the operator's channels - this is the audience /broadcast
+    (handlers/broadcast.py) sends to.
+
+    Telegram only lets a bot message someone who has interacted with it in
+    a qualifying way; a chat_join_request IS that qualifying interaction
+    (the same Bot API 5.5+ exception handlers/join_requests.py's
+    pre-approval/welcome messages rely on). Recording happens the instant
+    a join request arrives, regardless of whether that particular channel
+    currently has auto-approve turned on - so this list only ever contains
+    people who have actually reached out to one of the operator's channels
+    through this bot, never a scraped member list. Rows are removed when a
+    broadcast send comes back "forbidden" (blocked the bot / deactivated
+    account), so the audience self-cleans over time instead of
+    re-attempting dead ends on every future broadcast.
+    """
+
+    __tablename__ = "broadcast_users"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

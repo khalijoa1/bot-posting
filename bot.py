@@ -22,6 +22,7 @@ from handlers import (
     sources,
     repost_rules,
     join_requests,
+    broadcast,
     moderation,
 )
 from middleware import AllowlistMiddleware
@@ -55,6 +56,7 @@ async def main() -> None:
     dp.include_router(sources.router)
     dp.include_router(repost_rules.router)
     dp.include_router(join_requests.router)
+    dp.include_router(broadcast.router)
     # moderation.router has a broad "any group message" catch-all handler,
     # so it must be included LAST - otherwise it would swallow messages
     # (including the operator's own commands sent inside a group) before
