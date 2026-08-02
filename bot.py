@@ -11,6 +11,7 @@ from db import init_db
 from handlers import (
     menu,
     compose,
+    bulkpost,
     category_post,
     posts,
     channels,
@@ -43,6 +44,7 @@ async def main() -> None:
     # Include all handlers in proper order
     dp.include_router(menu.router)
     dp.include_router(compose.router)
+    dp.include_router(bulkpost.router)
     dp.include_router(category_post.router)
     dp.include_router(posts.router)
     dp.include_router(channels.router)

@@ -68,6 +68,14 @@ async def init_db() -> None:
         if cols and "extra_message_ids" not in cols:
             await conn.exec_driver_sql("ALTER TABLE post_targets ADD COLUMN extra_message_ids TEXT")
 
+        # Simple additive column: powers the recurring-post feature. NULL
+        # for every existing post just means "doesn't repeat", which is the
+        # correct default for posts created before this feature existed.
+        result3 = await conn.exec_driver_sql("PRAGMA table_info('posts')")
+        post_cols = [r[1] for r in result3.fetchall()]
+        if post_cols and "repeat_interval_seconds" not in post_cols:
+            await conn.exec_driver_sql("ALTER TABLE posts ADD COLUMN repeat_interval_seconds INTEGER")
+
         await conn.run_sync(Base.metadata.create_all)
 
 
