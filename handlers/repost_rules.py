@@ -31,6 +31,7 @@ class RuleUIState(StatesGroup):
     button_text = State()
     button_url = State()
     prefix_text = State()
+    default_link = State()
 
 
 def _cancel_kb():
@@ -50,6 +51,13 @@ def _parse_replacements(text: str) -> tuple[dict[str, str], str | None]:
     gets swapped for - anything that isn't one of the specific pairs above.
     Blank lines and lines without a separator are skipped rather than
     raising, so one typo doesn't nuke every other line the user typed.
+
+    This '*' syntax still works here for anyone already used to it, but
+    fwd:editdefault (see below) is the dedicated, discoverable way to set
+    just the fallback without having to remember this shorthand - both
+    write to the exact same "fallback" key, so either path works
+    interchangeably and neither overwrites the other's data unless the
+    operator explicitly changes it.
     """
     mapping: dict[str, str] = {}
     fallback: str | None = None
@@ -101,12 +109,12 @@ async def _rule_detail_view(rule_id: int) -> tuple[str, types.InlineKeyboardMark
     else:
         lines.append("No specific link replacements set.")
     if fallback:
-        lines.append(f"\nAny other link/@username → {fallback}")
+        lines.append(f"\n🔗 Default link (used for any other link/@username): {fallback}")
     else:
         lines.append(
-            "\nAny other link/@username in a post → removed. The source's "
-            "own link or username is never posted as-is - it's either "
-            "swapped for one of yours or stripped out."
+            "\n🔗 Default link: not set - any link/@username you haven't "
+            "listed above is currently just removed instead of replaced. "
+            "Tap \"Set Default Link\" below to fix that."
         )
 
     lines.append("")
@@ -125,19 +133,30 @@ async def _rule_detail_view(rule_id: int) -> tuple[str, types.InlineKeyboardMark
     }
     lines.append(f"🔍 Link preview (text posts only): {preview_labels.get(rule.link_preview_mode, 'Telegram default')}")
 
-    rows = [
-        [types.InlineKeyboardButton(text="✏️ Edit Word/Link Replacements", callback_data=f"fwd:editrepl:{rule_id}")],
-        [types.InlineKeyboardButton(text="🔘 Set Button", callback_data=f"fwd:editbtn:{rule_id}")],
-        [types.InlineKeyboardButton(text="📝 Set Prefix Text", callback_data=f"fwd:editprefix:{rule_id}")],
-        [types.InlineKeyboardButton(text="🔍 Link Preview", callback_data=f"fwd:previewmenu:{rule_id}")],
-        [types.InlineKeyboardButton(text="🗑️ Remove Rule", callback_data=f"fwd:delrule:{rule_id}")],
-        [types.InlineKeyboardButton(text="🔙 Back", callback_data=f"fwd:src:{source_id}")],
-    ]
+    # Built sequentially (each "Set X" row immediately followed by its own
+    # "Remove X" row when applicable) rather than via post-hoc insert(index,
+    # ...) calls - that indexed-insert approach is exactly the kind of thing
+    # that quietly breaks the moment a row is added or reordered above it.
+    rows = [[types.InlineKeyboardButton(text="✏️ Edit Word/Link Replacements", callback_data=f"fwd:editrepl:{rule_id}")]]
+
+    rows.append([types.InlineKeyboardButton(
+        text=("🔗 Edit Default Link" if fallback else "🔗 Set Default Link"),
+        callback_data=f"fwd:editdefault:{rule_id}",
+    )])
+    if fallback:
+        rows.append([types.InlineKeyboardButton(text="🚫 Remove Default Link", callback_data=f"fwd:deldefault:{rule_id}")])
+
+    rows.append([types.InlineKeyboardButton(text="🔘 Set Button", callback_data=f"fwd:editbtn:{rule_id}")])
     if rule.inline_button_text and rule.inline_button_url:
-        rows.insert(2, [types.InlineKeyboardButton(text="🚫 Remove Button", callback_data=f"fwd:delbtn:{rule_id}")])
+        rows.append([types.InlineKeyboardButton(text="🚫 Remove Button", callback_data=f"fwd:delbtn:{rule_id}")])
+
+    rows.append([types.InlineKeyboardButton(text="📝 Set Prefix Text", callback_data=f"fwd:editprefix:{rule_id}")])
     if rule.prefix_text:
-        rows.insert(4 if (rule.inline_button_text and rule.inline_button_url) else 3,
-                     [types.InlineKeyboardButton(text="🚫 Remove Prefix", callback_data=f"fwd:delprefix:{rule_id}")])
+        rows.append([types.InlineKeyboardButton(text="🚫 Remove Prefix", callback_data=f"fwd:delprefix:{rule_id}")])
+
+    rows.append([types.InlineKeyboardButton(text="🔍 Link Preview", callback_data=f"fwd:previewmenu:{rule_id}")])
+    rows.append([types.InlineKeyboardButton(text="🗑️ Remove Rule", callback_data=f"fwd:delrule:{rule_id}")])
+    rows.append([types.InlineKeyboardButton(text="🔙 Back", callback_data=f"fwd:src:{source_id}")])
     return "\n".join(lines), types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -251,16 +270,13 @@ async def cb_edit_replacements_start(query: types.CallbackQuery, state: FSMConte
         "This works for ANY word or phrase, not just links - e.g.:\n"
         "https://t.me/sourcechannel -> https://t.me/mychannel\n"
         "@sourcechannel -> @mychannel\n"
-        "old brand name -> your brand name\n"
-        "* -> https://t.me/mychannel\n\n"
-        "Every specific line above does an exact find-and-replace, word or "
-        "link alike. The '*' line is the link/username fallback only - it "
-        "catches ANY other link or @username in the post (ones you didn't "
-        "list) and replaces it with that value instead. Even without a '*' "
-        "line, any unlisted link or username is still never posted as-is - "
-        "it's simply removed. Plain words with no '*' match are left "
-        "untouched unless you list them explicitly above. Send 'clear' to "
-        "remove all replacements (including the fallback) for this rule.",
+        "old brand name -> your brand name\n\n"
+        "Every line above does an exact find-and-replace, word or link "
+        "alike. To set what ANY other link/@username you didn't list gets "
+        "replaced with, use \"🔗 Set Default Link\" on the rule screen "
+        "instead - that's the same setting, just its own dedicated option. "
+        "Send 'clear' to remove all specific replacements for this rule "
+        "(the default link, if set, is untouched by this).",
         reply_markup=_cancel_kb(),
     )
     await query.answer()
@@ -280,13 +296,12 @@ async def apply_replacements(message: types.Message, state: FSMContext):
 
     if raw.lower() == "clear":
         mapping: dict[str, str] = {}
-        fallback: str | None = None
     else:
-        mapping, fallback = _parse_replacements(raw)
-        if not mapping and not fallback:
+        mapping, inline_fallback = _parse_replacements(raw)
+        if not mapping and not inline_fallback:
             await message.answer(
-                "❌ Couldn't find any 'old -> new' pairs (or a '*' fallback line) in "
-                "that. Try again, one per line, or send 'clear' to remove all "
+                "❌ Couldn't find any 'old -> new' pairs in that. Try again, "
+                "one per line, or send 'clear' to remove all specific "
                 "replacements.",
                 reply_markup=_cancel_kb(),
             )
@@ -305,28 +320,111 @@ async def apply_replacements(message: types.Message, state: FSMContext):
         except Exception:
             repls = {}
         repls["default"] = mapping
-        if fallback:
-            repls["fallback"] = fallback
-        else:
-            repls.pop("fallback", None)
+        # A "* -> ..." line typed into this free-text box still sets the
+        # same fallback "🔗 Set Default Link" manages - kept for anyone
+        # already used to that shorthand, without clobbering an existing
+        # default link if this particular message didn't include one.
+        if raw.lower() != "clear" and inline_fallback:
+            repls["fallback"] = inline_fallback
         rule.replacements_json = json.dumps(repls)
         await s.commit()
 
     await state.clear()
-    if mapping or fallback:
-        parts = []
-        if mapping:
-            parts.append(f"{len(mapping)} specific replacement(s)")
-        if fallback:
-            parts.append(f"a fallback ({fallback})")
-        await message.answer(f"✅ Saved {' and '.join(parts)} for this rule.")
+    if mapping:
+        await message.answer(f"✅ Saved {len(mapping)} specific replacement(s) for this rule.")
     else:
-        await message.answer(
-            "✅ Cleared this rule's replacements - any link/@username in a "
-            "forwarded post will now just be stripped out."
-        )
+        await message.answer("✅ Cleared this rule's specific replacements.")
     text, kb = await _rule_detail_view(rule_id)
     await message.answer(text, reply_markup=kb)
+
+
+# ---------------------------------------------------------------------------
+# Default link: what ANY link/@username NOT covered by a specific
+# replacement above gets swapped for, instead of just being stripped out.
+# Stored in the same replacements_json["fallback"] key _apply_replacements /
+# _scrub_remaining_links in services/reposter.py already reads - this is
+# purely a dedicated, discoverable UI for that existing mechanism, since
+# previously the only way to set it was the "* -> ..." shorthand buried
+# inside the free-text replacements editor above.
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("fwd:editdefault:"))
+async def cb_edit_default_link_start(query: types.CallbackQuery, state: FSMContext):
+    rule_id = int(query.data.split(":")[2])
+    await state.update_data(rule_id=rule_id)
+    await state.set_state(RuleUIState.default_link)
+    await query.message.answer(
+        "Send the link (or @username) to use whenever a forwarded post "
+        "contains a link/@username you haven't set a specific replacement "
+        "for, e.g.:\n\n"
+        "https://t.me/mychannel\n"
+        "or\n"
+        "@mychannel\n\n"
+        "Without this set, any such link/@username is simply removed from "
+        "the post instead of being replaced. This never overrides a "
+        "specific \"old -> new\" pair from ✏️ Edit Word/Link Replacements - "
+        "it only applies to whatever's left over.",
+        reply_markup=_cancel_kb(),
+    )
+    await query.answer()
+
+
+@router.message(RuleUIState.default_link, F.text == "❌ Cancel")
+async def cancel_edit_default_link(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
+@router.message(RuleUIState.default_link, F.text)
+async def save_default_link(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    rule_id = data.get("rule_id")
+    value = message.text.strip()
+    if not value:
+        await message.answer("❌ Send a link or @username", reply_markup=_cancel_kb())
+        return
+
+    async with session() as s:
+        rule = await s.get(RepostRule, rule_id)
+        if not rule:
+            await message.answer("❌ Rule not found (it may have been removed)", reply_markup=main_menu_kb())
+            await state.clear()
+            return
+        try:
+            repls = json.loads(rule.replacements_json) if rule.replacements_json else {}
+            if not isinstance(repls, dict):
+                repls = {}
+        except Exception:
+            repls = {}
+        repls["fallback"] = value
+        repls.setdefault("default", {})
+        rule.replacements_json = json.dumps(repls)
+        await s.commit()
+
+    await state.clear()
+    await message.answer(f"✅ Default link set: {value}\n\nEvery other link/@username in a forwarded post will now be replaced with this instead of removed.")
+    text, kb = await _rule_detail_view(rule_id)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("fwd:deldefault:"))
+async def cb_remove_default_link(query: types.CallbackQuery):
+    rule_id = int(query.data.split(":")[2])
+    async with session() as s:
+        rule = await s.get(RepostRule, rule_id)
+        if rule:
+            try:
+                repls = json.loads(rule.replacements_json) if rule.replacements_json else {}
+                if not isinstance(repls, dict):
+                    repls = {}
+            except Exception:
+                repls = {}
+            repls.pop("fallback", None)
+            rule.replacements_json = json.dumps(repls)
+            await s.commit()
+    await query.answer("Default link removed")
+    text, kb = await _rule_detail_view(rule_id)
+    await query.message.edit_text(text, reply_markup=kb)
 
 
 # ---------------------------------------------------------------------------
