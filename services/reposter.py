@@ -42,6 +42,9 @@ _LINK_RE = re.compile(r"(?:https?://|www\.)\S+|(?<!\w)t\.me/\S+", re.IGNORECASE)
 # Matches @username mentions (Telegram usernames are 5-32 chars; using a
 # slightly looser 3-32 to be safe rather than under-match).
 _MENTION_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,32}\b")
+# A bare Telegram username on its own (used to recognize a fallback/default
+# link value like "mychannel" typed without "@" or a full t.me/ URL).
+_BARE_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
 
 
 def _scrub_remaining_links(text: str | None, fallback: str | None) -> str | None:
@@ -76,10 +79,7 @@ def _strip_masked_links(text: str | None, entities, fallback: str | None) -> str
     anywhere in the message's plain text, so _scrub_remaining_links's
     regex - which can only see literal characters - has nothing to match
     and lets the anchor text straight through, still fully clickable and
-    still pointing at the source's own link. This was the actual bug
-    behind "text formatted to a link isn't being replaced, only posted as
-    it is": there was never any code path that even looked at entities,
-    only at the rendered text.
+    still pointing at the source's own link.
 
     This walks the message's real entities (independent of what the
     visible text says) and swaps every masked link's anchor text for the
@@ -115,6 +115,31 @@ def _strip_masked_links(text: str | None, entities, fallback: str | None) -> str
     return buf.decode("utf-16-le", errors="ignore")
 
 
+def _rule_replacement_config(rule: RepostRule, dest: Channel) -> tuple[dict[str, str], str | None]:
+    """Extract this rule's {old: new} replacement mapping and default/
+    fallback link from replacements_json, scoped the same way this always
+    has been (a rule-wide "default" mapping, or an older per-destination-
+    keyed one for rules created before that existed). Shared by the
+    message-body replacement pass (_apply_replacements) and the inline
+    source-button URL translator (_build_source_buttons) below, so a
+    mapping or default link set once in the UI applies identically to
+    both - a source's own link gets replaced the same way whether it
+    showed up as plain text, a masked "text formatted as a link", or a
+    button.
+    """
+    mapping: dict[str, str] = {}
+    fallback: str | None = None
+    if rule.replacements_json:
+        try:
+            repls = json.loads(rule.replacements_json)
+        except Exception:
+            repls = {}
+        if isinstance(repls, dict):
+            mapping = repls.get("default") or repls.get(str(dest.chat_id)) or repls.get(str(dest.id)) or {}
+            fallback = repls.get("fallback")
+    return mapping, fallback
+
+
 def _apply_replacements(text: str | None, entities, rule: RepostRule, dest: Channel) -> str | None:
     """Swap the source channel's links/usernames for the operator's own.
 
@@ -133,11 +158,6 @@ def _apply_replacements(text: str | None, entities, rule: RepostRule, dest: Chan
        replacements configured at all - the source's own link or username
        must never be posted as-is, one way or another.
 
-    Rules created through the UI store the mapping under the "default" key
-    regardless of destination. Older rules created via the original
-    /add_rule + hand-edited replacements_json may instead key by
-    destination chat_id/channel id - both are honoured here.
-
     IMPORTANT: step 3's scrub pass has to run over the WHOLE text (that's
     what guarantees a link nobody explicitly listed still gets caught), but
     that means it would also catch and re-replace whatever step 2 just
@@ -153,27 +173,17 @@ def _apply_replacements(text: str | None, entities, rule: RepostRule, dest: Chan
     if not text:
         return text
 
-    mapping: dict[str, str] = {}
-    fallback: str | None = None
-    if rule.replacements_json:
-        try:
-            repls = json.loads(rule.replacements_json)
-        except Exception:
-            repls = {}
-        if isinstance(repls, dict):
-            mapping = repls.get("default") or repls.get(str(dest.chat_id)) or repls.get(str(dest.id)) or {}
-            fallback = repls.get("fallback")
+    mapping, fallback = _rule_replacement_config(rule, dest)
 
     text = _strip_masked_links(text, entities, fallback)
 
     placeholders: dict[str, str] = {}
-    if isinstance(mapping, dict):
-        for i, (old, new) in enumerate(mapping.items()):
-            if not old:
-                continue
-            token = f"\x00REPL{i}\x00"
-            placeholders[token] = new
-            text = text.replace(old, token)
+    for i, (old, new) in enumerate(mapping.items()):
+        if not old:
+            continue
+        token = f"\x00REPL{i}\x00"
+        placeholders[token] = new
+        text = text.replace(old, token)
 
     text = _scrub_remaining_links(text, fallback)
 
@@ -181,6 +191,84 @@ def _apply_replacements(text: str | None, entities, rule: RepostRule, dest: Chan
         text = text.replace(token, new)
 
     return text
+
+
+def _coerce_button_url(value: str) -> str | None:
+    """Turn whatever a rule's specific replacement value or default/
+    fallback link is stored as (a full https:// URL, a tg:// deep link, an
+    "@username", a bare "t.me/..." link, or a bare username typed with
+    neither) into a URL actually usable on a Telegram inline button - the
+    Bot API rejects a button whose url isn't a real URL, so a bare
+    "@mychannel" (perfectly valid as inline *text*, which is all the other
+    replacement paths ever needed until now) would otherwise make the
+    whole send fail. Returns None if the value can't be turned into
+    anything URL-shaped, so the caller can drop that button instead of
+    crashing the repost over it.
+    """
+    value = value.strip()
+    if not value:
+        return None
+    if value.startswith(("http://", "https://", "tg://")):
+        return value
+    if value.startswith("@"):
+        value = value[1:]
+        return f"https://t.me/{value}" if value else None
+    if value.lower().startswith("t.me/") or value.lower().startswith("www.t.me/"):
+        return f"https://{value.split('://')[-1]}"
+    if _BARE_USERNAME_RE.match(value):
+        return f"https://t.me/{value}"
+    return None
+
+
+def _translate_button_url(url: str, mapping: dict[str, str], fallback: str | None) -> str | None:
+    """Resolve what a single source inline button's URL should become:
+    the rule's specific replacement for that exact URL if one is
+    configured, otherwise the rule's default/fallback link, otherwise
+    None (meaning: drop the button rather than forward the source's own
+    link) - the same precedence _apply_replacements uses for text."""
+    candidate = mapping.get(url) or fallback
+    if not candidate:
+        return None
+    return _coerce_button_url(candidate)
+
+
+def _build_source_buttons(message, mapping: dict[str, str], fallback: str | None) -> list[list[InlineKeyboardButton]]:
+    """Forward the SOURCE post's own inline URL button(s) - e.g. a "Join
+    our channel" button a source attaches to its posts - with each
+    button's underlying URL swapped through the exact same replacement
+    mapping / default-link fallback used for the message body, instead of
+    either leaking the source's own link untouched or (the previous
+    behavior) silently dropping the button entirely regardless of what it
+    pointed to. A button whose URL isn't covered by a specific mapping and
+    has no default link configured is dropped - same "no fallback -> just
+    remove it" behavior _scrub_remaining_links already applies to a plain
+    link in text - rather than posted with the source's own link intact.
+
+    Non-URL buttons (callback/switch-inline/game/login/etc.) only make
+    sense wired to the SOURCE's own bot and chat, so they're skipped
+    rather than forwarded - reposted onto a different bot/channel they'd
+    be either non-functional or actively misleading.
+    """
+    markup = getattr(message, "reply_markup", None)
+    rows = getattr(markup, "rows", None)
+    if not rows:
+        return []
+
+    built: list[list[InlineKeyboardButton]] = []
+    for row in rows:
+        out_row: list[InlineKeyboardButton] = []
+        for btn in getattr(row, "buttons", None) or []:
+            src_url = getattr(btn, "url", None)
+            if not src_url:
+                continue
+            new_url = _translate_button_url(src_url, mapping, fallback)
+            if not new_url:
+                continue
+            label = getattr(btn, "text", None) or "🔗 Link"
+            out_row.append(InlineKeyboardButton(text=label, url=new_url))
+        if out_row:
+            built.append(out_row)
+    return built
 
 
 def _apply_prefix(text: str | None, rule: RepostRule) -> str | None:
@@ -193,16 +281,39 @@ def _apply_prefix(text: str | None, rule: RepostRule) -> str | None:
 
 
 def _build_button(rule: RepostRule) -> InlineKeyboardMarkup | None:
-    """Build the rule's single inline link button, if both a label and a
-    URL are configured. Telegram inline buttons only support plain text -
-    no custom emoji rendering and no background/color styling - so the
-    label is shown exactly as typed (emoji characters in the text itself
-    still work fine, e.g. "🔗 Join VIP")."""
+    """Build the rule's single, operator-configured inline link button, if
+    both a label and a URL are set for it - this is separate from (and
+    always added in addition to) any of the SOURCE's own buttons handled
+    by _build_source_buttons above. Telegram inline buttons only support
+    plain text - no custom emoji rendering and no background/color
+    styling - so the label is shown exactly as typed (emoji characters in
+    the text itself still work fine, e.g. "🔗 Join VIP")."""
     if not rule.inline_button_text or not rule.inline_button_url:
         return None
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=rule.inline_button_text, url=rule.inline_button_url)]]
     )
+
+
+def _build_reply_markup(message, rule: RepostRule, dest: Channel) -> InlineKeyboardMarkup | None:
+    """Combine the rule's own configured button (if any) with the
+    source post's own button(s) - link-translated via
+    _build_source_buttons - into a single keyboard. The rule's own button
+    always comes first/on top; the source's (translated) buttons follow
+    beneath it. Returns None (no keyboard at all) only if neither is
+    present, which keeps behavior identical to before this feature existed
+    for posts that had no buttons of either kind."""
+    mapping, fallback = _rule_replacement_config(rule, dest)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    own = _build_button(rule)
+    if own:
+        rows.extend(own.inline_keyboard)
+    rows.extend(_build_source_buttons(message, mapping, fallback))
+
+    if not rows:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _build_link_preview(rule: RepostRule) -> LinkPreviewOptions | None:
@@ -324,9 +435,11 @@ async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rule
             caption = _render_template(rule.caption_template, context) if rule.caption_template else cleaned_text
             caption = _apply_prefix(caption, rule)
             # Telegram's send_media_group has no reply_markup parameter at
-            # all, so a rule's configured inline button (if any) simply
-            # can't apply to an album repost - that's a Telegram platform
-            # limitation, not something skipped by mistake here.
+            # all, so NEITHER a rule's own configured button NOR any of the
+            # source's own buttons can apply to an album repost - that's a
+            # Telegram platform limitation (albums can't carry an inline
+            # keyboard at all, on any bot), not something skipped by
+            # mistake here.
             media = _build_media_group(items, caption or None)
 
             try:
@@ -492,7 +605,11 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
             }
             caption = _render_template(rule.caption_template, context) if rule.caption_template else cleaned_text
             caption = _apply_prefix(caption, rule)
-            reply_markup = _build_button(rule)
+            # Combines the rule's own configured button (if set) with the
+            # SOURCE message's own inline URL button(s), each translated
+            # through this rule's replacement mapping / default link -
+            # see _build_reply_markup.
+            reply_markup = _build_reply_markup(message, rule, dest)
 
             try:
                 if photo_bytes:
