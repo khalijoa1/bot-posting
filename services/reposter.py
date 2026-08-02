@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from aiogram import Bot
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from sqlalchemy import or_, select
 
 from db import session
@@ -98,6 +98,47 @@ def _apply_replacements(text: str | None, rule: RepostRule, dest: Channel) -> st
     return _scrub_remaining_links(text, fallback)
 
 
+def _apply_prefix(text: str | None, rule: RepostRule) -> str | None:
+    """Prepend the rule's configured prefix text (with a blank line after
+    it) to a forwarded message/caption. If there's no body text at all,
+    the prefix becomes the whole message on its own."""
+    if not rule.prefix_text:
+        return text
+    return f"{rule.prefix_text}\n\n{text}" if text else rule.prefix_text
+
+
+def _build_button(rule: RepostRule) -> InlineKeyboardMarkup | None:
+    """Build the rule's single inline link button, if both a label and a
+    URL are configured. Telegram inline buttons only support plain text -
+    no custom emoji rendering and no background/color styling - so the
+    label is shown exactly as typed (emoji characters in the text itself
+    still work fine, e.g. "🔗 Join VIP")."""
+    if not rule.inline_button_text or not rule.inline_button_url:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=rule.inline_button_text, url=rule.inline_button_url)]]
+    )
+
+
+def _build_link_preview(rule: RepostRule) -> LinkPreviewOptions | None:
+    """Translate the rule's link_preview_mode into Telegram's
+    link_preview_options for a text message. Only meaningful on
+    send_message - photo/video captions never get a link preview at all,
+    that's a Telegram platform behavior, not something this app controls."""
+    mode = rule.link_preview_mode
+    if not mode or mode == "default":
+        return None
+    if mode == "disabled":
+        return LinkPreviewOptions(is_disabled=True)
+    if mode == "small":
+        return LinkPreviewOptions(is_disabled=False, prefer_small_media=True)
+    if mode == "large":
+        return LinkPreviewOptions(is_disabled=False, prefer_large_media=True)
+    if mode == "above":
+        return LinkPreviewOptions(is_disabled=False, show_above_text=True)
+    return None
+
+
 async def handle_incoming_message(bot: Bot, event) -> None:
     """Process a Telethon NewMessage event and repost it to matching destinations.
 
@@ -182,6 +223,8 @@ async def handle_incoming_message(bot: Bot, event) -> None:
                 "source_username": source.identifier,
             }
             caption = _render_template(rule.caption_template, context) if rule.caption_template else cleaned_text
+            caption = _apply_prefix(caption, rule)
+            reply_markup = _build_button(rule)
 
             try:
                 if photo_bytes:
@@ -189,15 +232,22 @@ async def handle_incoming_message(bot: Bot, event) -> None:
                         chat_id=dest.chat_id,
                         photo=BufferedInputFile(photo_bytes, filename="repost.jpg"),
                         caption=caption,
+                        reply_markup=reply_markup,
                     )
                 elif video_bytes:
                     sent = await bot.send_video(
                         chat_id=dest.chat_id,
                         video=BufferedInputFile(video_bytes, filename="repost.mp4"),
                         caption=caption,
+                        reply_markup=reply_markup,
                     )
                 else:
-                    sent = await bot.send_message(chat_id=dest.chat_id, text=caption or "")
+                    sent = await bot.send_message(
+                        chat_id=dest.chat_id,
+                        text=caption or "",
+                        reply_markup=reply_markup,
+                        link_preview_options=_build_link_preview(rule),
+                    )
 
                 pt = PostTarget(post_id=post.id, channel_id=dest.id, message_id=sent.message_id, sent_at=datetime.utcnow())
                 s.add(pt)
