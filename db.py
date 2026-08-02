@@ -1,9 +1,14 @@
+import logging
+import re
 from collections.abc import AsyncIterator
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
 from config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -12,6 +17,22 @@ class Base(DeclarativeBase):
 
 engine = create_async_engine(get_settings().database_url, echo=False)
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+
+# Same normalization handlers/sources.py's _normalize_identifier() applies
+# to newly-typed identifiers - duplicated here (rather than imported) so
+# this one-time data cleanup below has no dependency on the handlers
+# package, matching every other migration in this function being
+# self-contained SQL/PRAGMA calls.
+_TME_URL_RE = re.compile(r"^(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/", re.IGNORECASE)
+
+
+def _clean_identifier(raw: str) -> str:
+    raw = raw.strip()
+    raw = _TME_URL_RE.sub("", raw).strip()
+    raw = raw[1:].strip() if raw.startswith("@") else raw
+    raw = raw.split("?", 1)[0].split("/", 1)[0].strip()
+    return raw
 
 
 async def init_db() -> None:
@@ -100,6 +121,52 @@ async def init_db() -> None:
             await conn.exec_driver_sql("ALTER TABLE channels ADD COLUMN required_join_json TEXT")
 
         await conn.run_sync(Base.metadata.create_all)
+
+        # One-time data cleanup: handlers/sources.py's "Add Source" flow
+        # (and the /add_source command) previously stored whatever an
+        # operator typed verbatim - including a full https://t.me/<name>
+        # share link if that's what they pasted (arguably the most natural
+        # thing to paste, straight from Telegram's own "Copy Link" button).
+        # services/reposter.py only ever matches against the numeric chat
+        # id or the bare/"@"-prefixed username Telethon reports, so any
+        # source stored as a full URL never matched anything and silently
+        # never forwarded - discovered via the repost-debug logging added
+        # to reposter.py, which showed known DB identifiers like
+        # 'https://t.me/bnnkenya' sitting next to incoming candidates like
+        # 'bnnkenya'/'@bnnkenya' that could never line up. This normalizes
+        # every existing row the same way new ones are normalized on the
+        # way in (_clean_identifier above), so already-configured sources
+        # start matching without operators having to remove and re-add
+        # each one by hand. Only rows that actually change are touched;
+        # already-clean identifiers (numeric ids, bare usernames) are left
+        # completely alone. Table is small (one row per watched channel)
+        # so a plain Python loop here is fine - no need for a bulk SQL
+        # expression that would need per-database string-function support.
+        result6 = await conn.exec_driver_sql("SELECT id, identifier FROM source_channels")
+        for src_id, identifier in result6.fetchall():
+            if not identifier:
+                continue
+            cleaned = _clean_identifier(identifier)
+            if cleaned and cleaned != identifier:
+                try:
+                    await conn.exec_driver_sql(
+                        "UPDATE source_channels SET identifier = ? WHERE id = ?",
+                        (cleaned, src_id),
+                    )
+                except IntegrityError:
+                    # `identifier` is UNIQUE - if some other source was
+                    # already added using the clean form (e.g. one source
+                    # added as "@bnnkenya" and another, separately, as
+                    # "https://t.me/bnnkenya"), normalizing this row would
+                    # collide with that existing row. Leave this one as-is
+                    # rather than crash-looping the whole bot on startup;
+                    # it'll show up as a duplicate the operator can remove
+                    # by hand via Forwarding -> Remove Source.
+                    logger.warning(
+                        "Skipped cleaning source_channels.id=%s identifier=%r -> %r: "
+                        "would collide with an existing source",
+                        src_id, identifier, cleaned,
+                    )
 
 
 def session() -> AsyncSession:
