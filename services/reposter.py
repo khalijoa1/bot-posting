@@ -138,6 +138,39 @@ def _render_repost_content(text: str | None, entities, rule: RepostRule, dest: C
         return text
 
     mapping, fallback = _rule_replacement_config(rule, dest)
+    # Longest "old" text first: if one replacement's "old" is a substring
+    # of another's (e.g. a plain word "channel" configured alongside a
+    # full "https://t.me/somechannel" link), applying the shorter pattern
+    # first would consume part of the longer one before it ever gets a
+    # chance to match, silently corrupting or skipping the more specific
+    # replacement. Sorting longest-first guarantees the most specific
+    # pattern always wins, regardless of which order the operator typed
+    # the "old -> new" lines in.
+    ordered_mapping = sorted(mapping.items(), key=lambda kv: len(kv[0]), reverse=True)
+
+    def _mask_replacements(segment: str) -> tuple[str, dict[str, str]]:
+        """First pass: swap each configured "old" text for a unique inert
+        placeholder token, longest-old-first (see ordering note above).
+        Returns the masked segment plus a token->new map to unmask with
+        afterward. Splitting mask/unmask into two calls (instead of one
+        combined replace pass) is what lets a scrub pass run safely in
+        between for plain text - see _render_plain - without either
+        re-mangling text that's already been replaced or having the scrub
+        itself get confused by a `new` value that happens to look like a
+        link."""
+        placeholders: dict[str, str] = {}
+        for i, (old, new) in enumerate(ordered_mapping):
+            if not old:
+                continue
+            token = f"\x00REPL{i}\x00"
+            placeholders[token] = new
+            segment = segment.replace(old, token)
+        return segment, placeholders
+
+    def _unmask_replacements(segment: str, placeholders: dict[str, str]) -> str:
+        for token, new in placeholders.items():
+            segment = segment.replace(token, new)
+        return segment
 
     masked = sorted(
         (e for e in (entities or []) if type(e).__name__ == "MessageEntityTextUrl"),
@@ -148,16 +181,9 @@ def _render_repost_content(text: str | None, entities, rule: RepostRule, dest: C
 
     def _render_plain(raw: bytes) -> str:
         segment = raw.decode("utf-16-le", errors="ignore")
-        placeholders: dict[str, str] = {}
-        for i, (old, new) in enumerate(mapping.items()):
-            if not old:
-                continue
-            token = f"\x00REPL{i}\x00"
-            placeholders[token] = new
-            segment = segment.replace(old, token)
+        segment, placeholders = _mask_replacements(segment)
         segment = _scrub_links(segment, fallback)
-        for token, new in placeholders.items():
-            segment = segment.replace(token, new)
+        segment = _unmask_replacements(segment, placeholders)
         return html_lib.escape(segment, quote=True)
 
     parts: list[str] = []
@@ -173,6 +199,17 @@ def _render_repost_content(text: str | None, entities, rule: RepostRule, dest: C
         parts.append(_render_plain(buf[cursor:start]))
 
         anchor_text = buf[start:end].decode("utf-16-le", errors="ignore")
+        # The rule's "old -> new" word/phrase replacements apply to the
+        # anchor's VISIBLE text too, not just its target URL below -
+        # previously only the href was translated, so a source's masked
+        # "text formatted as a link" whose visible label itself contained
+        # a word the operator configured a replacement for (e.g. their own
+        # old brand/channel name used as the clickable text, not just the
+        # link target) passed through unchanged. Same mask/unmask
+        # mechanism as plain text, just with no link-scrub step in between
+        # since the label isn't a raw link itself.
+        anchor_masked, anchor_placeholders = _mask_replacements(anchor_text)
+        anchor_text = _unmask_replacements(anchor_masked, anchor_placeholders)
         new_url = _translate_button_url(e.url, mapping, fallback)
         if new_url:
             href = html_lib.escape(new_url, quote=True)
@@ -187,6 +224,81 @@ def _render_repost_content(text: str | None, entities, rule: RepostRule, dest: C
     parts.append(_render_plain(buf[cursor:]))
 
     return "".join(parts).strip()
+
+
+# Telegram Bot API limits, in characters counted AFTER entity parsing (i.e.
+# the text a user actually sees, not the raw HTML markup this app builds it
+# from) - a photo/video caption tops out at 1024, a plain text message at
+# 4096. A source post whose own caption plus this rule's prefix/template
+# exceeded the applicable limit was previously sent to Telegram as-is and
+# rejected outright with "message caption is too long", which dropped that
+# ENTIRE post for every rule sharing the same send in one shot - not
+# trimmed, just gone, with no partial repost and no way to tell from the
+# destination channel that anything was even attempted.
+_CAPTION_LIMIT = 1024
+_TEXT_LIMIT = 4096
+
+
+def _truncate_html(html_str: str, limit: int) -> str:
+    """Trim an HTML string (as produced by _render_repost_content) down to
+    at most `limit` VISIBLE characters, leaving HTML tags/entities
+    themselves uncounted since Telegram's limit is measured on the
+    decoded text, not the markup. Closes off any tag left open by an
+    in-tag cut so the result stays valid HTML rather than risking a
+    dangling unclosed <a> breaking the whole send."""
+    if len(html_str) <= limit:
+        # Cheap upper bound: the visible length can never exceed the raw
+        # markup length, so if the raw string already fits there's
+        # nothing to trim.
+        return html_str
+
+    budget = max(0, limit - 1)  # leave room for a trailing ellipsis
+    out: list[str] = []
+    open_tags: list[str] = []
+    visible = 0
+    i = 0
+    n = len(html_str)
+    cut_short = False
+    while i < n:
+        ch = html_str[i]
+        if ch == "<":
+            end = html_str.find(">", i)
+            if end == -1:
+                break
+            tag = html_str[i:end + 1]
+            inner = tag[1:-1].strip()
+            if inner.startswith("/"):
+                name = inner[1:].strip()
+                if open_tags and open_tags[-1] == name:
+                    open_tags.pop()
+            elif not inner.endswith("/"):
+                name = inner.split()[0] if inner.split() else inner
+                open_tags.append(name)
+            out.append(tag)
+            i = end + 1
+            continue
+        if ch == "&":
+            end = html_str.find(";", i)
+            if end != -1 and end - i <= 10:
+                if visible >= budget:
+                    cut_short = True
+                    break
+                out.append(html_str[i:end + 1])
+                visible += 1
+                i = end + 1
+                continue
+        if visible >= budget:
+            cut_short = True
+            break
+        out.append(ch)
+        visible += 1
+        i += 1
+
+    if cut_short or i < n:
+        out.append("…")
+    for name in reversed(open_tags):
+        out.append(f"</{name}>")
+    return "".join(out)
 
 
 def _coerce_button_url(value: str) -> str | None:
@@ -439,6 +551,10 @@ async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rule
             }
             caption = _render_template(rule.caption_template, context) if rule.caption_template else cleaned_text
             caption = _apply_prefix(caption, rule)
+            if caption:
+                # Albums are always sent as photo/video, so the 1024-char
+                # caption limit always applies here - see _truncate_html.
+                caption = _truncate_html(caption, _CAPTION_LIMIT)
             # Telegram's send_media_group has no reply_markup parameter at
             # all, so NEITHER a rule's own configured button NOR any of the
             # source's own buttons can apply to an album repost - that's a
@@ -610,6 +726,15 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
             }
             caption = _render_template(rule.caption_template, context) if rule.caption_template else cleaned_text
             caption = _apply_prefix(caption, rule)
+            if caption:
+                # A photo/video caption tops out at 1024 chars, a plain
+                # text message at 4096 - see _truncate_html. Sending
+                # unchecked previously meant a long source caption (plus
+                # this rule's own prefix/template on top) got rejected by
+                # Telegram outright, dropping the whole post for this rule
+                # rather than posting a trimmed version of it.
+                limit = _CAPTION_LIMIT if (photo_bytes or video_bytes) else _TEXT_LIMIT
+                caption = _truncate_html(caption, limit)
             # Combines the rule's own configured button (if set) with the
             # SOURCE message's own inline URL button(s), each translated
             # through this rule's replacement mapping / default link -
