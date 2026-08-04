@@ -157,14 +157,22 @@ def _render_repost_content(text: str | None, entities, rule: RepostRule, dest: C
         between for plain text - see _render_plain - without either
         re-mangling text that's already been replaced or having the scrub
         itself get confused by a `new` value that happens to look like a
-        link."""
+        link.
+
+        Matching is case-INsensitive (re.IGNORECASE) - a rule set up to
+        replace "black" previously only matched a literal lowercase
+        "black" via str.replace(), so the exact same word capitalized at
+        the start of a sentence ("Black ...") or written in caps
+        ("BLACK") passed straight through untouched. An operator typing
+        one "old -> new" line clearly means every casing of that word/
+        phrase, not just the one they happened to type."""
         placeholders: dict[str, str] = {}
         for i, (old, new) in enumerate(ordered_mapping):
             if not old:
                 continue
             token = f"\x00REPL{i}\x00"
             placeholders[token] = new
-            segment = segment.replace(old, token)
+            segment = re.sub(re.escape(old), token, segment, flags=re.IGNORECASE)
         return segment, placeholders
 
     def _unmask_replacements(segment: str, placeholders: dict[str, str]) -> str:
