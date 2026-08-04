@@ -240,6 +240,16 @@ def _group_settings_kb(g: ModeratedGroup) -> types.InlineKeyboardMarkup:
                 text=f"{_mark(g.spam_action, SpamAction.DELETE_KICK)} Delete + kick immediately",
                 callback_data=f"modspam_{g.id}_delete_kick"
             )],
+            [types.InlineKeyboardButton(text="— 📨 Messages —", callback_data="modnoop")],
+            # Both open screens defined in handlers/group_messages.py
+            # (gwelcome_/grecur_ callback prefixes) - that module is
+            # fully built and wired into bot.py already, it was just
+            # never reachable from here.
+            [types.InlineKeyboardButton(
+                text=f"🎉 Welcome Message ({'ON' if g.welcome_enabled else 'OFF'})",
+                callback_data=f"gwelcome_{g.id}"
+            )],
+            [types.InlineKeyboardButton(text="🔁 Recurring Messages", callback_data=f"grecur_{g.id}")],
             [types.InlineKeyboardButton(text="✅ Done", callback_data="moddone")],
         ]
     )
