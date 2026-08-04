@@ -245,7 +245,45 @@ class ModeratedGroup(Base):
     spam_action: Mapped[SpamAction] = mapped_column(
         Enum(SpamAction, name="spam_action"), default=SpamAction.WARN_MUTE
     )
+    # --- Welcome message, sent to the group when someone new joins -------
+    # Same text/media/buttons shape as a recurring message (see
+    # RecurringMessage below) but stored inline here since a group has at
+    # most one welcome message, whereas it can have many recurring ones.
+    welcome_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    welcome_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    welcome_media_type: Mapped[str | None] = mapped_column(String(16), nullable=True)  # "photo" | "video" | None
+    welcome_media_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # JSON list of {"text": str, "url": str} - rendered as one inline
+    # button per row, in order. None/empty means no buttons.
+    welcome_buttons_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    recurring_messages: Mapped[list["RecurringMessage"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+
+
+class RecurringMessage(Base):
+    """A message a moderated group's operator wants posted to that group on
+    a repeating interval (announcements, rules reminders, promos, etc.).
+    Same text/media/buttons shape as the group's welcome message; sent by
+    services/recurring.py rather than on-join. A group can have several of
+    these (e.g. a rules reminder every 12h and a promo every 24h)."""
+
+    __tablename__ = "recurring_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("moderated_groups.id", ondelete="CASCADE"), index=True)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    media_type: Mapped[str | None] = mapped_column(String(16), nullable=True)  # "photo" | "video" | None
+    media_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    buttons_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    interval_seconds: Mapped[int] = mapped_column(Integer)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    group: Mapped["ModeratedGroup"] = relationship(back_populates="recurring_messages")
 
 
 class BroadcastUser(Base):

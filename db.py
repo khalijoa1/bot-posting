@@ -137,6 +137,29 @@ async def init_db() -> None:
         if chan_cols and "pre_approval_message" not in chan_cols:
             await conn.exec_driver_sql("ALTER TABLE channels ADD COLUMN pre_approval_message TEXT")
 
+        # Simple additive columns: per-group welcome message (sent when
+        # someone new joins a moderated group - see
+        # handlers/group_messages.py and models.ModeratedGroup). NULL/False
+        # on every existing group just means "no welcome message
+        # configured yet" - moderation keeps behaving exactly as before
+        # until an operator sets one up.
+        result7 = await conn.exec_driver_sql("PRAGMA table_info('moderated_groups')")
+        mg_cols = [r[1] for r in result7.fetchall()]
+        if mg_cols and "welcome_enabled" not in mg_cols:
+            await conn.exec_driver_sql(
+                "ALTER TABLE moderated_groups ADD COLUMN welcome_enabled BOOLEAN DEFAULT 0"
+            )
+        if mg_cols and "welcome_text" not in mg_cols:
+            await conn.exec_driver_sql("ALTER TABLE moderated_groups ADD COLUMN welcome_text TEXT")
+        if mg_cols and "welcome_media_type" not in mg_cols:
+            await conn.exec_driver_sql("ALTER TABLE moderated_groups ADD COLUMN welcome_media_type VARCHAR(16)")
+        if mg_cols and "welcome_media_file_id" not in mg_cols:
+            await conn.exec_driver_sql("ALTER TABLE moderated_groups ADD COLUMN welcome_media_file_id VARCHAR(255)")
+        if mg_cols and "welcome_buttons_json" not in mg_cols:
+            await conn.exec_driver_sql("ALTER TABLE moderated_groups ADD COLUMN welcome_buttons_json TEXT")
+
+        # recurring_messages is a brand-new table (models.RecurringMessage) -
+        # create_all below handles it automatically, no ALTER needed.
         await conn.run_sync(Base.metadata.create_all)
 
         # One-time data cleanup: handlers/sources.py's "Add Source" flow
