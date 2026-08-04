@@ -41,13 +41,27 @@ class AllowlistMiddleware(BaseMiddleware):
     Without this, anyone who finds the bot on Telegram could issue commands
     that post into the operator's channels.
 
-    One narrow, opt-in exception: plain (non-command, non-menu-button)
-    text/media messages inside a group the operator has explicitly
-    registered with /add_group are let through regardless of sender, so the
-    moderation feature can see and act on every member's messages. Commands
-    and the operator's private-menu button texts stay gated everywhere,
-    including inside moderated groups, so this can't be used to drive the
-    operator's private flows from a group.
+    Two narrow, opt-in exceptions:
+    1. Plain (non-command, non-menu-button) text/media messages inside a
+       group the operator has explicitly registered with /add_group are
+       let through regardless of sender, so the moderation feature can see
+       and act on every member's messages.
+    2. The /add_group command itself is let through regardless of sender -
+       this is the documented fallback (see handlers/moderation.py's
+       module docstring) for registering a group that was added to by
+       someone other than an approved operator, e.g. a second account of
+       the operator's own that isn't in ALLOWED_USER_IDS. Blocking it here
+       made that fallback silently do nothing with zero feedback, which is
+       exactly what was reported: adding the bot as admin via another
+       account never resulted in moderation starting. The real
+       authorization for it happens inside the add_group handler itself,
+       which verifies the sender is genuinely an admin of that specific
+       chat_id via Telegram before registering anything, so this doesn't
+       open up anything an actual group admin couldn't already do.
+
+    Every other command and the operator's private-menu button texts stay
+    gated everywhere, including inside moderated groups, so neither
+    exception can be used to drive the operator's private flows.
     """
 
     async def __call__(
@@ -66,6 +80,8 @@ class AllowlistMiddleware(BaseMiddleware):
                 is_group = msg.chat.type in GROUP_CHAT_TYPES
                 is_command_or_menu = text.startswith("/") or text in _MENU_BUTTON_TEXTS
                 if is_group and not is_command_or_menu and await _is_moderated_group(msg.chat.id):
+                    return await handler(event, data)
+                if text.strip().split(" ", 1)[:1] == ["/add_group"]:
                     return await handler(event, data)
             elif event.callback_query:
                 user = event.callback_query.from_user
