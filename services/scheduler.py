@@ -117,6 +117,20 @@ def _build_media_group(items: list[PostMediaItem], caption: str | None) -> list:
     return media
 
 
+def _build_button(button_text: str | None, button_url: str | None) -> types.InlineKeyboardMarkup | None:
+    """Same construction as handlers/compose.py:_build_button - kept as a
+    separate copy here (rather than imported) so this background loop has
+    no dependency on the handlers package, matching the rest of this
+    module's self-contained style. Both fields must be set for a button to
+    show - see models.Post.button_text/button_url.
+    """
+    if not button_text or not button_url:
+        return None
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[[types.InlineKeyboardButton(text=button_text, url=button_url)]]
+    )
+
+
 async def run_post_send_loop(bot: Bot) -> None:
     """Background scheduler that sends Posts once their scheduled_time arrives.
 
@@ -148,6 +162,19 @@ async def run_post_send_loop(bot: Bot) -> None:
                         mi_res = await s.execute(mi_q)
                         media_items = mi_res.scalars().all()
 
+                    # Built once per post, reused for every target below.
+                    # None for ALBUM posts regardless of what's stored on
+                    # the row - Telegram's send_media_group has no
+                    # reply_markup parameter at all (same hard platform
+                    # limitation already documented in services/reposter.py
+                    # for reposts and in handlers/compose.py's ask_button,
+                    # which never lets an album post collect a button in
+                    # the first place).
+                    reply_markup = (
+                        None if post.content_type == ContentType.ALBUM
+                        else _build_button(post.button_text, post.button_url)
+                    )
+
                     for target in targets:
                         if target.message_id is not None:
                             continue
@@ -167,6 +194,7 @@ async def run_post_send_loop(bot: Bot) -> None:
                                     chat_id=target.channel.chat_id,
                                     photo=post.photo_file_id,
                                     caption=post.text or None,
+                                    reply_markup=reply_markup,
                                 )
                                 target.message_id = msg.message_id
                             elif post.content_type == ContentType.VIDEO and post.video_file_id:
@@ -174,10 +202,15 @@ async def run_post_send_loop(bot: Bot) -> None:
                                     chat_id=target.channel.chat_id,
                                     video=post.video_file_id,
                                     caption=post.text or None,
+                                    reply_markup=reply_markup,
                                 )
                                 target.message_id = msg.message_id
                             else:
-                                msg = await bot.send_message(chat_id=target.channel.chat_id, text=post.text or "")
+                                msg = await bot.send_message(
+                                    chat_id=target.channel.chat_id,
+                                    text=post.text or "",
+                                    reply_markup=reply_markup,
+                                )
                                 target.message_id = msg.message_id
                             target.sent_at = now
                         except Exception:
