@@ -9,6 +9,8 @@ handlers/join_requests.py). A channel can have auto-approve on with
 neither message set (silent approval), just one of the two, or both -
 and either can be set before auto-approve is even turned on.
 """
+import logging
+
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -19,6 +21,7 @@ from db import session
 from handlers.common import main_menu_kb
 from models import Channel
 
+logger = logging.getLogger(__name__)
 router = Router()
 
 
@@ -27,6 +30,10 @@ class WelcomeMsgState(StatesGroup):
 
 
 class PreApprovalMsgState(StatesGroup):
+    text = State()
+
+
+class AutoCommentState(StatesGroup):
     text = State()
 
 
@@ -281,3 +288,251 @@ async def save_preapproval(message: types.Message, state: FSMContext):
 async def approve_button(message: types.Message):
     """Auto-approve from menu."""
     await auto_approve(message)
+
+
+# ---------------------------------------------------------------------------
+# Auto-comment: bot replies with a fixed message in a channel's linked
+# discussion group under every post, so it shows up as the first comment.
+#
+# Mechanism: when a channel has a discussion group linked (Telegram
+# Channel settings -> Discussion) and the bot is a member/admin of BOTH the
+# channel and that group, Telegram automatically copies every channel post
+# into the group as a regular message with is_automatic_forward=True and
+# its forward origin pointing back at the channel. Replying to that copied
+# message in the group (reply_to_message_id) is exactly what makes a
+# message show up as a "comment" under the original channel post - this
+# isn't a special API, it's just a normal reply that Telegram's UI renders
+# as a comment because of the forward link. See
+# handle_channel_auto_forward below.
+# ---------------------------------------------------------------------------
+
+def _auto_comment_kb(channels) -> types.InlineKeyboardMarkup:
+    rows = []
+    for ch in channels:
+        rows.append([
+            types.InlineKeyboardButton(
+                text=f"{'✅ ON' if ch.auto_comment_enabled else '❌ OFF'} - {ch.title}",
+                callback_data=f"acmt_{ch.id}"
+            ),
+            types.InlineKeyboardButton(
+                text=f"✏️ {'Edit' if ch.auto_comment_text else 'Set'} Comment",
+                callback_data=f"acmttext_{ch.id}"
+            ),
+        ])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(Command("autocomment"))
+async def auto_comment_settings(message: types.Message):
+    """Show auto-comment settings: per-channel on/off plus the fixed
+    message text to post as a comment under every post to that channel."""
+    async with session() as s:
+        q = select(Channel)
+        res = await s.execute(q)
+        channels = res.scalars().all()
+
+    if not channels:
+        await message.answer(
+            "━━━━━━━━━━━━━━━━━━\n"
+            "💬 AUTO-COMMENT\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "❌ No channels added yet"
+        )
+        return
+
+    await message.answer(
+        "━━━━━━━━━━━━━━━━━━\n"
+        "💬 AUTO-COMMENT\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "Posts a fixed message as the first comment under every post sent "
+        "to a channel (e.g. \"Join our VIP group 👉\"). Tap a channel to "
+        "toggle it, or ✏️ to set/edit its message - each channel can have "
+        "its own text.\n\n"
+        "Requirements: the channel needs a discussion group already linked "
+        "in Telegram (Channel settings -> Discussion), and the bot must be "
+        "a member/admin of that discussion group too, not just the "
+        "channel itself - otherwise it never sees the post land there to "
+        "reply to.",
+        reply_markup=_auto_comment_kb(channels)
+    )
+
+
+@router.callback_query(F.data.startswith("acmt_"))
+async def toggle_auto_comment(query: types.CallbackQuery):
+    """Toggle auto-comment for a channel."""
+    ch_id = int(query.data.replace("acmt_", ""))
+
+    async with session() as s:
+        ch = await s.get(Channel, ch_id)
+        if not ch:
+            await query.answer("Not found", show_alert=True)
+            return
+
+        ch.auto_comment_enabled = not ch.auto_comment_enabled
+        s.add(ch)
+        await s.commit()
+        status = "✅ ENABLED" if ch.auto_comment_enabled else "❌ DISABLED"
+        title = ch.title
+
+        q = select(Channel)
+        res = await s.execute(q)
+        channels = res.scalars().all()
+
+    await query.message.edit_reply_markup(reply_markup=_auto_comment_kb(channels))
+    await query.answer(f"{title}: {status}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("acmttext_"))
+async def start_set_auto_comment(query: types.CallbackQuery, state: FSMContext):
+    """Prompt for the fixed comment text for one channel."""
+    ch_id = int(query.data.replace("acmttext_", ""))
+
+    async with session() as s:
+        ch = await s.get(Channel, ch_id)
+        if not ch:
+            await query.answer("Not found", show_alert=True)
+            return
+        title = ch.title
+        current = ch.auto_comment_text
+
+    await state.update_data(auto_comment_channel_id=ch_id)
+    await state.set_state(AutoCommentState.text)
+
+    current_block = f"\n\nCurrent message:\n{current}" if current else ""
+    await query.message.answer(
+        f"✏️ AUTO-COMMENT - {title}\n\n"
+        f"Send the message to post as a comment under every future post to "
+        f"this channel.{current_block}",
+        reply_markup=types.ReplyKeyboardMarkup(
+            keyboard=[
+                [types.KeyboardButton(text="🗑️ Clear Message")],
+                [types.KeyboardButton(text="❌ Cancel")]
+            ],
+            resize_keyboard=True
+        )
+    )
+    await query.answer()
+
+
+@router.message(AutoCommentState.text, F.text == "❌ Cancel")
+async def cancel_set_auto_comment(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
+@router.message(AutoCommentState.text, F.text == "🗑️ Clear Message")
+async def clear_auto_comment(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    ch_id = data.get("auto_comment_channel_id")
+
+    async with session() as s:
+        ch = await s.get(Channel, ch_id)
+        if ch:
+            ch.auto_comment_text = None
+            s.add(ch)
+            await s.commit()
+
+    await message.answer("✅ Auto-comment message cleared", reply_markup=main_menu_kb())
+    await state.clear()
+
+
+@router.message(AutoCommentState.text, F.text)
+async def save_auto_comment(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    ch_id = data.get("auto_comment_channel_id")
+    text = message.text.strip()
+
+    async with session() as s:
+        ch = await s.get(Channel, ch_id)
+        if not ch:
+            await message.answer("❌ Channel not found", reply_markup=main_menu_kb())
+            await state.clear()
+            return
+        ch.auto_comment_text = text
+        s.add(ch)
+        await s.commit()
+        title = ch.title
+
+    await message.answer(
+        f"✅ AUTO-COMMENT SAVED for {title}\n\n"
+        f"It'll be posted as a comment under every future post to this "
+        f"channel (as long as auto-comment is toggled ON for it and the "
+        f"discussion group is linked with the bot in it).",
+        reply_markup=main_menu_kb()
+    )
+    await state.clear()
+
+
+@router.message(lambda msg: msg.text == "💬 Auto-Comment")
+async def auto_comment_button(message: types.Message):
+    """Auto-comment from menu."""
+    await auto_comment_settings(message)
+
+
+# Dedup guard for albums: Telegram auto-forwards each item of a multi-photo
+# post into the discussion group as its own message, all sharing one
+# media_group_id - without this, a 3-photo album post would get 3 separate
+# copies of the same auto-comment instead of one. In-memory only (same
+# pattern as moderation.py's spam counters); capped so it can't grow
+# unbounded on a long-running process.
+_recent_album_comments: set[str] = set()
+_ALBUM_DEDUP_CAP = 500
+
+
+def _forward_origin_chat_id(message: types.Message) -> tuple[int, int] | None:
+    """Return (origin_chat_id, origin_message_id) for a message that was
+    auto-forwarded from a channel into its linked discussion group, or
+    None if this message isn't that. Checks the modern `forward_origin`
+    field first (Bot API 7.0+) and falls back to the older
+    `forward_from_chat`/`forward_from_message_id` pair some aiogram/Bot API
+    combinations still populate, so this works regardless of exact version.
+    """
+    origin = getattr(message, "forward_origin", None)
+    if origin is not None:
+        chat = getattr(origin, "chat", None)
+        msg_id = getattr(origin, "message_id", None)
+        if chat is not None and msg_id is not None:
+            return chat.id, msg_id
+
+    ffc = getattr(message, "forward_from_chat", None)
+    ffmid = getattr(message, "forward_from_message_id", None)
+    if ffc is not None and ffmid is not None:
+        return ffc.id, ffmid
+
+    return None
+
+
+@router.message(F.is_automatic_forward, F.chat.type == "supergroup")
+async def handle_channel_auto_forward(message: types.Message) -> None:
+    """A channel post just landed in its linked discussion group - if that
+    channel has auto-comment on with a message set, reply to it here so it
+    shows up as the first comment under the post.
+    """
+    origin = _forward_origin_chat_id(message)
+    if not origin:
+        return
+    origin_chat_id, _origin_message_id = origin
+
+    if message.media_group_id:
+        dedup_key = f"{origin_chat_id}:{message.media_group_id}"
+        if dedup_key in _recent_album_comments:
+            return
+        _recent_album_comments.add(dedup_key)
+        if len(_recent_album_comments) > _ALBUM_DEDUP_CAP:
+            _recent_album_comments.clear()
+
+    async with session() as s:
+        q = select(Channel).where(Channel.chat_id == origin_chat_id)
+        res = await s.execute(q)
+        channel = res.scalars().first()
+
+    if not channel or not channel.auto_comment_enabled or not channel.auto_comment_text:
+        return
+
+    try:
+        await message.reply(channel.auto_comment_text)
+    except Exception:
+        logger.exception(
+            "Failed to post auto-comment for channel_id=%s in discussion group chat_id=%s",
+            channel.id, message.chat.id,
+        )

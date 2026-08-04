@@ -85,6 +85,7 @@ SETTINGS_TEXT = (
     "⚙️ SETTINGS\n"
     "━━━━━━━━━━━━━━━━━━━━━\n\n"
     "🔐 Auto-Approve - Approve join requests\n"
+    "💬 Auto-Comment - Post a fixed comment under every post, per channel\n"
     "📢 Broadcast - Message everyone who's ever submitted a join request "
     "to one of your channels"
 )
@@ -120,6 +121,7 @@ HELP_TEXT = (
     "/list_rules, /remove_rule\n\n"
     "⚙️ SETTINGS:\n"
     "/autoapprove - Auto-approve\n"
+    "/autocomment - Fixed comment posted under every post, per channel\n"
     "/broadcast - Message everyone who's ever submitted a join request\n\n"
     "📊 ANALYTICS:\n"
     "/analytics - Stats + channel growth\n\n"
@@ -157,6 +159,7 @@ MODERATION_KB = nav_kb([
 
 SETTINGS_KB = nav_kb([
     [("🔐 Auto-Approve Members", "act:autoapprove")],
+    [("💬 Auto-Comment", "act:autocomment")],
     [("📢 Broadcast", "act:broadcast")],
     [("🔙 Back", "menu:main")],
 ])
@@ -359,6 +362,13 @@ async def act_autoapprove(query: types.CallbackQuery):
     from handlers.settings import auto_approve
     await query.answer()
     await auto_approve(query.message)
+
+
+@router.callback_query(F.data == "act:autocomment")
+async def act_autocomment(query: types.CallbackQuery):
+    from handlers.settings import auto_comment_settings
+    await query.answer()
+    await auto_comment_settings(query.message)
 
 
 @router.callback_query(F.data == "act:broadcast")
