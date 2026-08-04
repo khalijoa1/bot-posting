@@ -52,6 +52,17 @@ class Channel(Base):
     # belong to before their join request to THIS channel gets auto-approved.
     # None/empty means no gating - approval works exactly as before.
     required_join_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Auto-comment: a fixed message the bot posts as a reply in this
+    # channel's linked discussion group every time a post lands in the
+    # channel, so it shows up as the first comment under every post. Only
+    # works if the channel already has a discussion group linked in
+    # Telegram (Channel settings -> Discussion) and the bot is a
+    # member/admin of that group too - see
+    # handlers/settings.py:handle_channel_auto_forward for the mechanism.
+    # Enabled by default per-channel, but auto_comment_text starts unset,
+    # so nothing is actually posted until an operator writes one.
+    auto_comment_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    auto_comment_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     targets: Mapped[list["PostTarget"]] = relationship(back_populates="channel")

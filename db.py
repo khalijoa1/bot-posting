@@ -137,6 +137,19 @@ async def init_db() -> None:
         if chan_cols and "pre_approval_message" not in chan_cols:
             await conn.exec_driver_sql("ALTER TABLE channels ADD COLUMN pre_approval_message TEXT")
 
+        # Simple additive columns: auto-comment (a fixed message the bot
+        # replies with in a channel's linked discussion group under every
+        # post - see handlers/settings.py). Default auto_comment_enabled
+        # to true (1) so it's on by default per the "all channels" scope
+        # this feature launched with, but auto_comment_text stays NULL, so
+        # nothing actually posts until an operator writes a message.
+        if chan_cols and "auto_comment_enabled" not in chan_cols:
+            await conn.exec_driver_sql(
+                "ALTER TABLE channels ADD COLUMN auto_comment_enabled BOOLEAN DEFAULT 1"
+            )
+        if chan_cols and "auto_comment_text" not in chan_cols:
+            await conn.exec_driver_sql("ALTER TABLE channels ADD COLUMN auto_comment_text TEXT")
+
         # Simple additive columns: per-group welcome message (sent when
         # someone new joins a moderated group - see
         # handlers/group_messages.py and models.ModeratedGroup). NULL/False
