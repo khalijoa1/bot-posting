@@ -18,6 +18,9 @@ router = Router()
 class ComposeState(StatesGroup):
     text = State()
     select_channels = State()
+    button_choice = State()
+    button_label = State()
+    button_url = State()
     schedule_choice = State()
     schedule_time = State()
     auto_delete = State()
@@ -170,21 +173,8 @@ async def handle_channels(query: types.CallbackQuery, state: FSMContext):
             await query.answer("Select at least 1 channel!", show_alert=True)
             return
 
-        # Ask about scheduling
-        kb = types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [types.InlineKeyboardButton(text="📤 Post Now", callback_data="sched_now")],
-                [types.InlineKeyboardButton(text="⏰ Schedule Later", callback_data="sched_later")],
-                [types.InlineKeyboardButton(text="❌ Cancel", callback_data="sched_cancel")]
-            ]
-        )
-
-        await query.message.answer(
-            "⏰ WHEN TO POST?",
-            reply_markup=kb
-        )
-        await state.set_state(ComposeState.schedule_choice)
         await query.answer()
+        await ask_button(query.message, state)
         return
 
     # Toggle channel
@@ -219,6 +209,129 @@ async def handle_channels(query: types.CallbackQuery, state: FSMContext):
 
     await query.message.edit_reply_markup(reply_markup=kb)
     await query.answer()
+
+
+async def ask_button(target: types.Message, state: FSMContext) -> None:
+    """Ask whether to attach an inline button to this post - skipped
+    entirely for albums, since Telegram's send_media_group has no
+    reply_markup parameter at all (same hard platform limitation already
+    documented in services/reposter.py for reposts).
+    """
+    data = await state.get_data()
+    if data.get("content_type") == "album":
+        await state.update_data(button_text=None, button_url=None)
+        await ask_schedule(target, state)
+        return
+
+    kb = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(text="🔘 Add Button", callback_data="btn_add")],
+            [types.InlineKeyboardButton(text="⏭️ Skip", callback_data="btn_skip")],
+            [types.InlineKeyboardButton(text="❌ Cancel", callback_data="btn_cancel")],
+        ]
+    )
+    await target.answer(
+        "🔘 ADD AN INLINE BUTTON?\n\n"
+        "Optional - a clickable button shown under the post, e.g. "
+        "\"Join VIP\" linking to your channel.",
+        reply_markup=kb,
+    )
+    await state.set_state(ComposeState.button_choice)
+
+
+@router.callback_query(ComposeState.button_choice, F.data.startswith("btn_"))
+async def handle_button_choice(query: types.CallbackQuery, state: FSMContext):
+    """Handle the add/skip/cancel choice from ask_button."""
+    choice = query.data.replace("btn_", "")
+
+    if choice == "cancel":
+        await state.clear()
+        await query.message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+        await query.answer()
+        return
+
+    if choice == "skip":
+        await state.update_data(button_text=None, button_url=None)
+        await query.answer()
+        await ask_schedule(query.message, state)
+        return
+
+    if choice == "add":
+        await query.message.answer(
+            "Send the BUTTON LABEL (plain text only):",
+            reply_markup=cancel_kb(),
+        )
+        await state.set_state(ComposeState.button_label)
+        await query.answer()
+
+
+@router.message(ComposeState.button_label, F.text == "❌ Cancel")
+async def cancel_button_label(message: types.Message, state: FSMContext):
+    """Cancel while typing the button label."""
+    await state.clear()
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
+@router.message(ComposeState.button_label, F.text)
+async def get_button_label(message: types.Message, state: FSMContext):
+    """Get the button label, then ask for its URL."""
+    label = message.text.strip()
+    if not label:
+        await message.answer("❌ Send some text for the button label", reply_markup=cancel_kb())
+        return
+    if len(label) > 64:
+        await message.answer("❌ Keep it under 64 characters. Try again:", reply_markup=cancel_kb())
+        return
+
+    await state.update_data(button_text=label)
+    await message.answer(
+        "Now send the LINK the button should open "
+        "(must start with http://, https://, or tg://):",
+        reply_markup=cancel_kb(),
+    )
+    await state.set_state(ComposeState.button_url)
+
+
+@router.message(ComposeState.button_url, F.text == "❌ Cancel")
+async def cancel_button_url(message: types.Message, state: FSMContext):
+    """Cancel while typing the button URL."""
+    await state.clear()
+    await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
+@router.message(ComposeState.button_url, F.text)
+async def get_button_url(message: types.Message, state: FSMContext):
+    """Get and validate the button URL, then continue to scheduling."""
+    url = message.text.strip()
+    if not (url.startswith("http://") or url.startswith("https://") or url.startswith("tg://")):
+        await message.answer(
+            "❌ Link must start with http://, https://, or tg://. Try again:",
+            reply_markup=cancel_kb(),
+        )
+        return
+
+    await state.update_data(button_url=url)
+    await message.answer("✅ Button set.")
+    await ask_schedule(message, state)
+
+
+async def ask_schedule(target: types.Message, state: FSMContext) -> None:
+    """Ask whether to post now or schedule for later - shared by the
+    "no button"/"album" path and the "button configured" path.
+    """
+    kb = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(text="📤 Post Now", callback_data="sched_now")],
+            [types.InlineKeyboardButton(text="⏰ Schedule Later", callback_data="sched_later")],
+            [types.InlineKeyboardButton(text="❌ Cancel", callback_data="sched_cancel")]
+        ]
+    )
+
+    await target.answer(
+        "⏰ WHEN TO POST?",
+        reply_markup=kb
+    )
+    await state.set_state(ComposeState.schedule_choice)
 
 
 @router.callback_query(ComposeState.schedule_choice)
@@ -456,22 +569,42 @@ def _build_media_group(items: list[dict], caption: str | None) -> list:
     return media
 
 
+def _build_button(button_text: str | None, button_url: str | None) -> types.InlineKeyboardMarkup | None:
+    """Build the single-button InlineKeyboardMarkup for a composed post, or
+    None if no button was configured. Both fields must be set - see
+    models.Post.button_text/button_url.
+    """
+    if not button_text or not button_url:
+        return None
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[[types.InlineKeyboardButton(text=button_text, url=button_url)]]
+    )
+
+
 async def _send_to_channel(bot, chat_id: int, content_type: str, text: str | None,
                             photo_file_id: str | None, video_file_id: str | None,
-                            album_items: list[dict] | None = None):
+                            album_items: list[dict] | None = None,
+                            reply_markup: types.InlineKeyboardMarkup | None = None):
     """Send a post to one channel, using the right Bot API method for its
     content type. Shared by the immediate-send and scheduled-send paths.
     Returns either a single Message (text/photo/video) or a list[Message]
     (album - one Message per item, in order).
+
+    reply_markup is ignored for albums - Telegram's send_media_group has no
+    reply_markup parameter at all (a hard platform limitation, already
+    documented in services/reposter.py for reposts). The compose flow's own
+    ask_button step already skips asking for a button on an album post for
+    this reason, so reply_markup is expected to already be None there, but
+    this stays defensive regardless of caller.
     """
     if content_type == "album" and album_items:
         media = _build_media_group(album_items, text or None)
         return await bot.send_media_group(chat_id=chat_id, media=media)
     if content_type == "photo" and photo_file_id:
-        return await bot.send_photo(chat_id=chat_id, photo=photo_file_id, caption=text or None)
+        return await bot.send_photo(chat_id=chat_id, photo=photo_file_id, caption=text or None, reply_markup=reply_markup)
     if content_type == "video" and video_file_id:
-        return await bot.send_video(chat_id=chat_id, video=video_file_id, caption=text or None)
-    return await bot.send_message(chat_id=chat_id, text=text or "")
+        return await bot.send_video(chat_id=chat_id, video=video_file_id, caption=text or None, reply_markup=reply_markup)
+    return await bot.send_message(chat_id=chat_id, text=text or "", reply_markup=reply_markup)
 
 
 def _split_result(result) -> tuple[int | None, str | None]:
@@ -496,6 +629,9 @@ async def post_now(state: FSMContext, bot, user_id: int, answer) -> None:
     selected_ids = data.get("selected_channels", [])
     auto_delete_seconds = data.get("auto_delete_seconds")
     repeat_interval_seconds = data.get("repeat_interval_seconds")
+    button_text = data.get("button_text")
+    button_url = data.get("button_url")
+    reply_markup = _build_button(button_text, button_url)
 
     success = 0
     failed = []
@@ -517,6 +653,8 @@ async def post_now(state: FSMContext, bot, user_id: int, answer) -> None:
             auto_delete_seconds=auto_delete_seconds,
             delete_at=delete_at,
             repeat_interval_seconds=repeat_interval_seconds,
+            button_text=button_text,
+            button_url=button_url,
         )
         s.add(post)
         await s.flush()
@@ -529,7 +667,8 @@ async def post_now(state: FSMContext, bot, user_id: int, answer) -> None:
         for ch in channels:
             try:
                 result = await _send_to_channel(
-                    bot, ch.chat_id, content_type, text, photo_file_id, video_file_id, album_items
+                    bot, ch.chat_id, content_type, text, photo_file_id, video_file_id, album_items,
+                    reply_markup=reply_markup,
                 )
                 message_id, extra_ids = _split_result(result)
                 target = PostTarget(
@@ -548,6 +687,8 @@ async def post_now(state: FSMContext, bot, user_id: int, answer) -> None:
         post_id = post.id
 
     result = f"✅ POSTED!\n\n━━━━━━━━━━\n{success}/{len(channels)}\n━━━━━━━━━━\nID: {post_id}"
+    if button_text and button_url:
+        result += f"\n🔘 Button: {button_text}"
     if repeat_interval_seconds:
         result += f"\n🔁 Repeats every {format_duration(repeat_interval_seconds)}"
     if failed:
@@ -574,6 +715,8 @@ async def post_scheduled(state: FSMContext, user_id: int, answer) -> None:
     scheduled_time = data.get("scheduled_time")
     auto_delete_seconds = data.get("auto_delete_seconds")
     repeat_interval_seconds = data.get("repeat_interval_seconds")
+    button_text = data.get("button_text")
+    button_url = data.get("button_url")
 
     async with session() as s:
         q = select(Channel).where(Channel.id.in_(selected_ids))
@@ -590,6 +733,8 @@ async def post_scheduled(state: FSMContext, user_id: int, answer) -> None:
             scheduled_time=scheduled_time,
             auto_delete_seconds=auto_delete_seconds,
             repeat_interval_seconds=repeat_interval_seconds,
+            button_text=button_text,
+            button_url=button_url,
         )
         s.add(post)
         await s.flush()
@@ -612,6 +757,8 @@ async def post_scheduled(state: FSMContext, user_id: int, answer) -> None:
         f"Channels: {len(channels)}\n"
         f"ID: {post_id}\n"
     )
+    if button_text and button_url:
+        result += f"🔘 Button: {button_text}\n"
     if repeat_interval_seconds:
         result += f"🔁 Repeats every {format_duration(repeat_interval_seconds)}\n"
     result += "━━━━━━━━━━━━━━━"
