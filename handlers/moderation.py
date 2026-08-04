@@ -11,10 +11,7 @@ auto-detection doesn't fire (e.g. the bot was added by someone other than
 an approved operator).
 
 Once registered, every member's plain messages in that group are checked
-against the group's rules and acted on automatically. A group can also
-have a welcome message (sent when someone new joins) and recurring
-messages (sent on a repeating interval) - see handlers/group_messages.py,
-linked from _group_settings_kb below.
+against the group's rules and acted on automatically.
 """
 from __future__ import annotations
 
@@ -44,6 +41,16 @@ async def group_admin_added(update: types.ChatMemberUpdated) -> None:
     to admin in it, so you don't have to look up and type its numeric
     chat_id - just add the bot as admin with Delete messages + Ban users
     permissions and moderation starts immediately with default settings.
+
+    No ALLOWED_USER_IDS check here (there used to be one): Telegram itself
+    only allows an existing admin or the group creator to promote another
+    account to admin in the first place, so whoever just did this already
+    has real admin authority over THIS specific group - checking the
+    bot's own operator allowlist on top of that only blocked the exact
+    "added by someone other than the approved operator" case this
+    module's own docstring says is supported, and did so silently with no
+    feedback: the bot simply never started moderating and nobody could
+    tell why.
     """
     if update.new_chat_member.status != ChatMemberStatus.ADMINISTRATOR:
         return
@@ -51,9 +58,7 @@ async def group_admin_added(update: types.ChatMemberUpdated) -> None:
         return  # already was admin (e.g. permissions edited) - not a new add
 
     actor = update.from_user
-    if not actor or actor.id not in get_settings().allowed_user_id_set:
-        # Someone who isn't an approved operator added the bot somewhere -
-        # ignore silently rather than auto-moderating a stranger's group.
+    if not actor:
         return
 
     chat = update.chat
@@ -95,7 +100,18 @@ async def group_admin_added(update: types.ChatMemberUpdated) -> None:
 
 @router.message(Command("add_group"))
 async def add_group(message: types.Message, command: CommandObject):
-    """Usage: /add_group CHAT_ID [title]"""
+    """Usage: /add_group CHAT_ID [title]
+
+    Available to anyone AllowlistMiddleware lets through to here (see its
+    own docstring) - the real gate is the admin check just below, not
+    ALLOWED_USER_IDS. Registration only succeeds if the sender is
+    genuinely an administrator of the target chat_id right now, verified
+    via Telegram itself, the same permission Telegram already required
+    before anyone could have made the bot an admin there in the first
+    place. That's what makes this actually work as the "added by someone
+    other than an approved operator" fallback promised above, instead of
+    silently doing nothing.
+    """
     args = command.args
     if not args:
         await message.reply(
@@ -111,6 +127,14 @@ async def add_group(message: types.Message, command: CommandObject):
         await message.reply("chat_id must be a number, e.g. -1001234567890")
         return
     title = parts[1].strip() if len(parts) > 1 else str(chat_id)
+
+    if not await _is_admin(message.bot, chat_id, message.from_user.id):
+        await message.reply(
+            "❌ I can't confirm you're an admin of that chat, or I'm not a "
+            "member of it yet. Add the bot to the group as admin first "
+            "(Delete messages + Ban users permissions), then try again."
+        )
+        return
 
     async with session() as s:
         q = select(ModeratedGroup).where(ModeratedGroup.chat_id == chat_id)
@@ -216,12 +240,6 @@ def _group_settings_kb(g: ModeratedGroup) -> types.InlineKeyboardMarkup:
                 text=f"{_mark(g.spam_action, SpamAction.DELETE_KICK)} Delete + kick immediately",
                 callback_data=f"modspam_{g.id}_delete_kick"
             )],
-            [types.InlineKeyboardButton(text="— 💬 Messages —", callback_data="modnoop")],
-            [types.InlineKeyboardButton(
-                text=f"🎉 Welcome Message ({'ON' if g.welcome_enabled else 'OFF'})",
-                callback_data=f"gwelcome_{g.id}"
-            )],
-            [types.InlineKeyboardButton(text="🔁 Recurring Messages", callback_data=f"grecur_{g.id}")],
             [types.InlineKeyboardButton(text="✅ Done", callback_data="moddone")],
         ]
     )
