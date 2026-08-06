@@ -9,6 +9,7 @@ handlers/join_requests.py). A channel can have auto-approve on with
 neither message set (silent approval), just one of the two, or both -
 and either can be set before auto-approve is even turned on.
 """
+import asyncio
 import logging
 
 from aiogram import Router, types, F
@@ -171,12 +172,43 @@ async def noop_auto_approve_page_indicator(query: types.CallbackQuery):
     await query.answer()
 
 
+async def _run_backlog_approve_and_notify(bot, chat_id: int, title: str, operator_id: int) -> None:
+    """Runs the actual bulk-approval and DMs the operator with the result
+    once it's done - see approve_backlog below for why this happens in the
+    background instead of inside the callback handler."""
+    from services.telethon_client import approve_pending_join_requests
+    approved, failed, error = await approve_pending_join_requests(chat_id)
+
+    if error:
+        text = f"⚠️ Couldn't approve backlog requests for {title}:\n\n{error}"
+    elif approved == 0 and failed == 0:
+        text = f"✅ {title}: no pending join requests found - nothing to do."
+    else:
+        text = f"✅ {title}: approved {approved} pending join request(s)."
+        if failed:
+            text += f"\n⚠️ {failed} couldn't be approved even after retries - check logs for details."
+
+    try:
+        await bot.send_message(operator_id, text)
+    except Exception:
+        pass
+
+
 @router.callback_query(F.data.startswith("appbacklog_"))
 async def approve_backlog(query: types.CallbackQuery):
     """Bulk-approve every join request to this channel that's been sitting
     pending since before the bot was made admin (or before auto-approve was
     turned on) - see services/telethon_client.approve_pending_join_requests
     for why this needs the Telethon userbot rather than the regular Bot API.
+
+    Runs in the background rather than blocking on the callback: Telegram
+    rate-limits bulk join-request approval hard, so a channel with more
+    than a handful of pending requests can take several minutes (or longer,
+    once flood waits kick in) to work through. Blocking here left the
+    operator staring at "Working on it..." with no way to tell whether it
+    was still running or had died - this kicks the whole thing off as a
+    background task instead and DMs the operator with the final
+    approved/failed counts once it's actually finished.
     """
     ch_id = int(query.data.replace("appbacklog_", ""))
 
@@ -188,24 +220,14 @@ async def approve_backlog(query: types.CallbackQuery):
         title = ch.title
         chat_id = ch.chat_id
 
-    await query.answer("Working on it - checking for pending requests...")
-
-    from services.telethon_client import approve_pending_join_requests
-    approved, failed, error = await approve_pending_join_requests(chat_id)
-
-    if error:
-        await query.message.answer(
-            f"⚠️ Couldn't approve backlog requests for {title}:\n\n{error}"
-        )
-        return
-
-    if approved == 0 and failed == 0:
-        await query.message.answer(f"✅ {title}: no pending join requests found - nothing to do.")
-    else:
-        text = f"✅ {title}: approved {approved} pending join request(s)."
-        if failed:
-            text += f"\n⚠️ {failed} couldn't be approved even after retries - check logs for details."
-        await query.message.answer(text)
+    await query.answer(
+        "Started in the background - a large backlog can take a while. "
+        "I'll DM you when it's done.",
+        show_alert=True,
+    )
+    asyncio.create_task(
+        _run_backlog_approve_and_notify(query.bot, chat_id, title, query.from_user.id)
+    )
 
 
 @router.callback_query(F.data.startswith("setwelcome_"))
