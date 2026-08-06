@@ -11,6 +11,7 @@ Channels can be registered two ways:
      in one guided flow up front).
 """
 import json
+import logging
 
 from aiogram import Router, types, F
 from aiogram.enums import ChatMemberStatus
@@ -26,6 +27,7 @@ from handlers.common import main_menu_kb
 from models import Channel, Category
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 def _cancel_kb() -> types.ReplyKeyboardMarkup:
@@ -301,32 +303,52 @@ async def list_channels(message: types.Message):
         )
         return
 
-    text = "━━━━━━━━━━━━━━━━━━\n📍 CHANNELS\n━━━━━━━━━━━━━━━━━━\n\n"
+    header = "━━━━━━━━━━━━━━━━━━\n📍 CHANNELS\n━━━━━━━━━━━━━━━━━━\n\n"
+    chunks = [header]
 
-    for ch in channels:
-        # Get fresh data, eagerly loading categories in the same query so
-        # touching fresh_ch.categories below doesn't trigger an implicit
-        # lazy-load SELECT outside of a greenlet context (which raises
-        # sqlalchemy.exc.MissingGreenlet and silently kills this handler -
-        # the exact cause of "the button just doesn't respond" reports,
-        # since the crash happens before Telegram gets any reply back).
-        async with session() as s:
-            fresh_ch = await s.get(
-                Channel, ch.id, options=[selectinload(Channel.categories)]
+    try:
+        for ch in channels:
+            # Get fresh data, eagerly loading categories in the same query so
+            # touching fresh_ch.categories below does not trigger an implicit
+            # lazy-load SELECT outside of a greenlet context (which raises
+            # sqlalchemy.exc.MissingGreenlet and silently kills this handler -
+            # one cause of "the button just does not respond" reports, since
+            # the crash happens before Telegram gets any reply back).
+            async with session() as s:
+                fresh_ch = await s.get(
+                    Channel, ch.id, options=[selectinload(Channel.categories)]
+                )
+                cat_names = [c.name for c in fresh_ch.categories] if fresh_ch and fresh_ch.categories else []
+
+            cats = ", ".join(cat_names) if cat_names else "None"
+            entry = (
+                f"ID: {ch.id}\n"
+                f"Title: {ch.title}\n"
+                f"Chat ID: {ch.chat_id}\n"
+                f"Categories: {cats}\n"
+                f"Auto-Approve: {'✅' if ch.auto_approve_members else '❌'}\n"
+                f"Welcome: {'✅' if ch.welcome_message else '❌'}\n\n"
             )
-            cat_names = [c.name for c in fresh_ch.categories] if fresh_ch.categories else []
 
-        cats = ", ".join(cat_names) if cat_names else "None"
-        text += (
-            f"ID: {ch.id}\n"
-            f"Title: {ch.title}\n"
-            f"Chat ID: {ch.chat_id}\n"
-            f"Categories: {cats}\n"
-            f"Auto-Approve: {'✅' if ch.auto_approve_members else '❌'}\n"
-            f"Welcome: {'✅' if ch.welcome_message else '❌'}\n\n"
+            # Telegram caps a single message at 4096 chars - start a new
+            # chunk instead of letting a long channel list silently fail to
+            # send. That is the other cause of "list channels does not
+            # respond": message.answer() raising on oversized text with
+            # nothing ever surfaced back to the user, since this handler had
+            # no error handling at all.
+            if len(chunks[-1]) + len(entry) > 3800:
+                chunks.append("")
+            chunks[-1] += entry
+
+        for chunk in chunks:
+            if chunk.strip():
+                await message.answer(chunk)
+    except Exception:
+        logger.exception("Failed to list channels")
+        await message.answer(
+            "⚠️ Something went wrong building the channel list. Try again, "
+            "or check the logs if it keeps happening."
         )
-
-    await message.answer(text)
 
 
 @router.message(Command("delete_channel"))
