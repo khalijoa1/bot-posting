@@ -37,13 +37,21 @@ class AutoCommentState(StatesGroup):
     text = State()
 
 
-def _auto_approve_kb(channels) -> types.InlineKeyboardMarkup:
+AUTO_APPROVE_PAGE_SIZE = 6
+
+
+def _auto_approve_kb(channels, page: int = 0) -> types.InlineKeyboardMarkup:
+    total_pages = max(1, (len(channels) + AUTO_APPROVE_PAGE_SIZE - 1) // AUTO_APPROVE_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * AUTO_APPROVE_PAGE_SIZE
+    page_channels = channels[start:start + AUTO_APPROVE_PAGE_SIZE]
+
     rows = []
-    for ch in channels:
+    for ch in page_channels:
         rows.append([
             types.InlineKeyboardButton(
                 text=f"{'✅ ON' if ch.auto_approve_members else '❌ OFF'} - {ch.title}",
-                callback_data=f"app_{ch.id}"
+                callback_data=f"app_{ch.id}_{page}"
             ),
         ])
         rows.append([
@@ -62,6 +70,16 @@ def _auto_approve_kb(channels) -> types.InlineKeyboardMarkup:
                 callback_data=f"appbacklog_{ch.id}"
             ),
         ])
+
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(types.InlineKeyboardButton(text="⬅️ Prev", callback_data=f"apppage_{page - 1}"))
+        nav.append(types.InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="appnoop"))
+        if page < total_pages - 1:
+            nav.append(types.InlineKeyboardButton(text="Next ➡️", callback_data=f"apppage_{page + 1}"))
+        rows.append(nav)
+
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -109,7 +127,9 @@ async def auto_approve(message: types.Message):
 @router.callback_query(F.data.startswith("app_"))
 async def toggle_approve(query: types.CallbackQuery):
     """Toggle auto-approve for a channel."""
-    ch_id = int(query.data.replace("app_", ""))
+    parts = query.data.split("_")
+    ch_id = int(parts[1])
+    page = int(parts[2]) if len(parts) > 2 else 0
 
     async with session() as s:
         ch = await s.get(Channel, ch_id)
@@ -127,8 +147,28 @@ async def toggle_approve(query: types.CallbackQuery):
         res = await s.execute(q)
         channels = res.scalars().all()
 
-    await query.message.edit_reply_markup(reply_markup=_auto_approve_kb(channels))
+    await query.message.edit_reply_markup(reply_markup=_auto_approve_kb(channels, page))
     await query.answer(f"{title}: {status}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("apppage_"))
+async def paginate_auto_approve(query: types.CallbackQuery):
+    """Redraw the auto-approve keyboard on a different page."""
+    page = int(query.data.replace("apppage_", ""))
+
+    async with session() as s:
+        q = select(Channel)
+        res = await s.execute(q)
+        channels = res.scalars().all()
+
+    await query.message.edit_reply_markup(reply_markup=_auto_approve_kb(channels, page))
+    await query.answer()
+
+
+@router.callback_query(F.data == "appnoop")
+async def noop_auto_approve_page_indicator(query: types.CallbackQuery):
+    """The '3/8' page indicator button - not meant to do anything when tapped."""
+    await query.answer()
 
 
 @router.callback_query(F.data.startswith("appbacklog_"))
