@@ -10,6 +10,7 @@ from typing import Any
 
 from aiogram import Bot
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramEntityTooLarge
 from aiogram.types import (
     BufferedInputFile,
     InlineKeyboardButton,
@@ -587,6 +588,20 @@ async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rule
                     "repost-debug: successfully reposted ALBUM (%d items) into dest channel id=%s chat_id=%s title=%r",
                     len(items), dest.id, dest.chat_id, dest.title,
                 )
+            except TelegramEntityTooLarge:
+                # Same Bot API ~50MB-per-freshly-uploaded-file cap as the
+                # single-item path (see _repost_single) - one oversized
+                # video anywhere in the album is enough to reject the whole
+                # send_media_group call. Nothing to retry here.
+                logger.warning(
+                    "repost-debug: skipped ALBUM into dest channel id=%s chat_id=%s title=%r - one or more "
+                    "items exceed the Bot API's ~50MB upload limit for freshly-sent files",
+                    dest.id, dest.chat_id, dest.title,
+                )
+                pt = PostTarget(post_id=post.id, channel_id=dest.id, message_id=None, sent_at=None)
+                s.add(pt)
+                await s.commit()
+                continue
             except Exception:
                 logger.exception("Failed to repost album into channel %s", dest.title)
                 pt = PostTarget(post_id=post.id, channel_id=dest.id, message_id=None, sent_at=None)
@@ -749,6 +764,28 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
             # see _build_reply_markup.
             reply_markup = _build_reply_markup(message, rule, dest)
 
+            # A text-only post whose entire content was a plain link/@mention
+            # with no fallback link configured on this rule ends up with an
+            # empty `caption` here (everything got scrubbed out - see
+            # _render_repost_content/_scrub_links). Telegram's Bot API
+            # rejects send_message with empty text outright ("Bad Request:
+            # message text is empty"), so this used to retry-and-fail the
+            # exact same way on EVERY future post from that source into
+            # that destination, forever, spamming the logs with a
+            # traceback for something that was never going to succeed.
+            # Skip cleanly instead - there's nothing meaningful left to
+            # post once the only content was a link that got stripped.
+            if not photo_bytes and not video_bytes and not (caption or "").strip():
+                logger.info(
+                    "repost-debug: skipped dest channel id=%s chat_id=%s title=%r - rendered content "
+                    "is empty (source post was only a link/mention with no fallback link set on this rule)",
+                    dest.id, dest.chat_id, dest.title,
+                )
+                pt = PostTarget(post_id=post.id, channel_id=dest.id, message_id=None, sent_at=None)
+                s.add(pt)
+                await s.commit()
+                continue
+
             try:
                 if photo_bytes:
                     sent = await bot.send_photo(
@@ -779,6 +816,24 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
                 s.add(pt)
                 await s.commit()
                 logger.info("repost-debug: successfully reposted into dest channel id=%s chat_id=%s title=%r", dest.id, dest.chat_id, dest.title)
+            except TelegramEntityTooLarge:
+                # Bot API caps a freshly-uploaded file (as opposed to
+                # re-sending an existing file_id) at ~50MB - a source video
+                # bigger than that can be downloaded fine via the userbot
+                # (a real account, no such cap) but can never be re-uploaded
+                # through the Bot API, for any destination, no matter how
+                # many times this retries. Log it plainly instead of a full
+                # traceback so it doesn't look like a transient bug that
+                # needs chasing.
+                logger.warning(
+                    "repost-debug: skipped dest channel id=%s chat_id=%s title=%r - source video exceeds "
+                    "the Bot API's ~50MB upload limit for freshly-sent files",
+                    dest.id, dest.chat_id, dest.title,
+                )
+                pt = PostTarget(post_id=post.id, channel_id=dest.id, message_id=None, sent_at=None)
+                s.add(pt)
+                await s.commit()
+                continue
             except Exception:
                 logger.exception("Failed to repost into channel %s", dest.title)
                 pt = PostTarget(post_id=post.id, channel_id=dest.id, message_id=None, sent_at=None)
