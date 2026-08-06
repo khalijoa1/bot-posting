@@ -177,3 +177,82 @@ async def approve_pending_join_requests(chat_id: int) -> tuple[int, str | None]:
         )
 
     return approved, None
+
+
+async def scan_group_backlog_links(bot, chat_id: int, link_policy) -> dict:
+    """Retroactively sweep a group's message history for links that violate
+    its current Link policy, deleting matches via the aiogram bot (which
+    holds the actual delete permission as the group's admin).
+
+    Why this needs Telethon: the Bot API only ever hands a bot messages
+    sent AFTER it joined/became admin - there is no "fetch history" method
+    for bots. A real user account (this same userbot used elsewhere in this
+    file for backlog join-request approval) CAN read a chat's full history
+    via MTProto, so this borrows the already-connected userbot client to
+    read old messages, then uses the regular bot (bot.delete_message) to
+    actually remove the violating ones, since the userbot itself may not
+    have delete rights there.
+
+    Requires the userbot account to also be a member of the group (adding
+    the aiogram bot as admin does not automatically add the userbot too -
+    this is a separate, real Telegram account). Returns a dict with either
+    an "error" key explaining why it couldn't run, or "scanned"/"deleted"
+    counts on success.
+    """
+    from handlers.moderation import LINK_RE, INVITE_AD_RE
+    from models import LinkPolicy
+
+    if _client is None:
+        return {"error": (
+            "Telethon userbot isn't connected - backlog link scanning needs "
+            "TELETHON_API_ID/HASH configured and the userbot account logged in."
+        )}
+
+    try:
+        entity = await _client.get_entity(chat_id)
+    except Exception as e:
+        return {"error": (
+            f"The userbot account can't see this group ({e}). It needs to "
+            f"be a member of the group too - separately from the aiogram "
+            f"bot - to read message history."
+        )}
+
+    scanned = 0
+    deleted = 0
+    admin_cache: dict[int, bool] = {}
+
+    try:
+        async for msg in _client.iter_messages(entity, limit=5000):
+            scanned += 1
+            text = msg.message or ""
+            if not text:
+                continue
+
+            is_violation = False
+            if link_policy == LinkPolicy.DELETE_ALL:
+                is_violation = bool(LINK_RE.search(text))
+            elif link_policy == LinkPolicy.DELETE_INVITES_ADS:
+                is_violation = bool(INVITE_AD_RE.search(text))
+            elif link_policy == LinkPolicy.ADMINS_ONLY:
+                if bool(LINK_RE.search(text)) and msg.sender_id:
+                    if msg.sender_id not in admin_cache:
+                        try:
+                            member = await bot.get_chat_member(chat_id, msg.sender_id)
+                            admin_cache[msg.sender_id] = member.status in ("administrator", "creator")
+                        except Exception:
+                            admin_cache[msg.sender_id] = True  # unknown - err toward not deleting
+                    is_violation = not admin_cache[msg.sender_id]
+
+            if is_violation:
+                try:
+                    await bot.delete_message(chat_id, msg.id)
+                    deleted += 1
+                except Exception:
+                    logger.exception(
+                        "Backlog scan: failed to delete message %s in chat %s", msg.id, chat_id
+                    )
+    except Exception as e:
+        logger.exception("Backlog link scan failed for chat_id=%s", chat_id)
+        return {"error": f"Scan stopped early after an error: {e}", "scanned": scanned, "deleted": deleted}
+
+    return {"scanned": scanned, "deleted": deleted}
