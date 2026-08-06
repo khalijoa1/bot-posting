@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     # scripts/telethon_login.py, stored as an env var instead of a session file.
     telethon_session_string: str = ""
 
+    # Shared-secret query-string token for the read-only stats dashboard
+    # (services/dashboard.py). Empty means the dashboard has no auth check -
+    # set this to something random in production so the URL alone isn't
+    # enough to view channel/post data.
+    dashboard_token: str = ""
+
     @property
     def allowed_user_id_set(self) -> set[int]:
         return {int(uid.strip()) for uid in self.allowed_user_ids.split(",") if uid.strip()}
