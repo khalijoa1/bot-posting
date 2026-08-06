@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from datetime import datetime, timedelta
 
 from aiogram import Bot, types
@@ -8,6 +9,8 @@ from sqlalchemy.orm import selectinload
 
 from db import session
 from models import ContentType, Post, PostMediaItem, PostStatus, PostTarget
+
+logger = logging.getLogger(__name__)
 
 
 def _target_message_ids(target: PostTarget) -> list[int]:
@@ -175,6 +178,7 @@ async def run_post_send_loop(bot: Bot) -> None:
                         else _build_button(post.button_text, post.button_url)
                     )
 
+                    any_sent = False
                     for target in targets:
                         if target.message_id is not None:
                             continue
@@ -213,8 +217,26 @@ async def run_post_send_loop(bot: Bot) -> None:
                                 )
                                 target.message_id = msg.message_id
                             target.sent_at = now
+                            any_sent = True
                         except Exception:
+                            logger.exception(
+                                "Failed to send post_id=%s to chat_id=%s",
+                                post.id, target.channel.chat_id,
+                            )
                             continue
+
+                    if not any_sent and post.repeat_interval_seconds:
+                        # Nothing actually sent this cycle for a repeating
+                        # post - leave it SCHEDULED so this loop's next pass
+                        # (30s later) retries automatically. Marking it SENT
+                        # here with no sent_at anywhere would permanently
+                        # kill the repeat cycle for posts with no
+                        # auto-delete: run_scheduler_loop only recycles those
+                        # based on target.sent_at, and if that stays empty
+                        # forever, the post never becomes due again - which
+                        # is exactly the "repeat stops after one send hiccup"
+                        # bug this guards against.
+                        continue
 
                     post.status = PostStatus.SENT
                     if post.auto_delete_seconds:
