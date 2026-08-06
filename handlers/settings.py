@@ -56,6 +56,12 @@ def _auto_approve_kb(channels) -> types.InlineKeyboardMarkup:
                 callback_data=f"setwelcome_{ch.id}"
             ),
         ])
+        rows.append([
+            types.InlineKeyboardButton(
+                text="⏳ Approve Backlog Requests",
+                callback_data=f"appbacklog_{ch.id}"
+            ),
+        ])
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -86,7 +92,11 @@ async def auto_approve(message: types.Message):
         "requests.\n\n"
         "📨 Before-msg: DMed the instant someone's join request comes "
         "in, before they're approved.\n"
-        "💬 After-msg: DMed once their request is actually approved.\n\n"
+        "💬 After-msg: DMed once their request is actually approved.\n"
+        "⏳ Approve Backlog: approves everyone whose join request is "
+        "still sitting pending from before the bot was made admin here - "
+        "a one-time catch-up, not something you need to run again "
+        "unless requests pile up while auto-approve is off.\n\n"
         "Note: the channel needs \"Approve new members\" turned on in "
         "Telegram. Telegram normally only lets a bot DM someone who's "
         "interacted with it before, but a join request itself counts as "
@@ -119,6 +129,40 @@ async def toggle_approve(query: types.CallbackQuery):
 
     await query.message.edit_reply_markup(reply_markup=_auto_approve_kb(channels))
     await query.answer(f"{title}: {status}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("appbacklog_"))
+async def approve_backlog(query: types.CallbackQuery):
+    """Bulk-approve every join request to this channel that's been sitting
+    pending since before the bot was made admin (or before auto-approve was
+    turned on) - see services/telethon_client.approve_pending_join_requests
+    for why this needs the Telethon userbot rather than the regular Bot API.
+    """
+    ch_id = int(query.data.replace("appbacklog_", ""))
+
+    async with session() as s:
+        ch = await s.get(Channel, ch_id)
+        if not ch:
+            await query.answer("Not found", show_alert=True)
+            return
+        title = ch.title
+        chat_id = ch.chat_id
+
+    await query.answer("Working on it - checking for pending requests...")
+
+    from services.telethon_client import approve_pending_join_requests
+    approved, error = await approve_pending_join_requests(chat_id)
+
+    if error:
+        await query.message.answer(
+            f"⚠️ Couldn't approve backlog requests for {title}:\n\n{error}"
+        )
+        return
+
+    if approved == 0:
+        await query.message.answer(f"✅ {title}: no pending join requests found - nothing to do.")
+    else:
+        await query.message.answer(f"✅ {title}: approved {approved} pending join request(s).")
 
 
 @router.callback_query(F.data.startswith("setwelcome_"))
