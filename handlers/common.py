@@ -5,6 +5,8 @@ import asyncio
 
 from aiogram import types
 
+from config import get_settings
+
 
 def main_menu_kb() -> types.InlineKeyboardMarkup:
     """The main-menu inline keyboard.
@@ -22,26 +24,30 @@ def main_menu_kb() -> types.InlineKeyboardMarkup:
     faster to navigate and keeps the chat from filling up with one throwaway
     keyboard message per tap.
     """
-    return types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(text="📨 Messaging", callback_data="menu:messaging"),
-                types.InlineKeyboardButton(text="📍 Channels", callback_data="menu:channels"),
-            ],
-            [
-                types.InlineKeyboardButton(text="📁 Categories", callback_data="menu:categories"),
-                types.InlineKeyboardButton(text="🛡️ Moderation", callback_data="menu:moderation"),
-            ],
-            [
-                types.InlineKeyboardButton(text="📡 Forwarding", callback_data="fwd:root"),
-                types.InlineKeyboardButton(text="⚙️ Settings", callback_data="menu:settings"),
-            ],
-            [
-                types.InlineKeyboardButton(text="📊 Analytics", callback_data="menu:analytics"),
-                types.InlineKeyboardButton(text="❓ Help", callback_data="menu:help"),
-            ],
-        ]
-    )
+    rows = [
+        [
+            types.InlineKeyboardButton(text="📨 Messaging", callback_data="menu:messaging"),
+            types.InlineKeyboardButton(text="📍 Channels", callback_data="menu:channels"),
+        ],
+        [
+            types.InlineKeyboardButton(text="📁 Categories", callback_data="menu:categories"),
+            types.InlineKeyboardButton(text="🛡️ Moderation", callback_data="menu:moderation"),
+        ],
+        [
+            types.InlineKeyboardButton(text="📡 Forwarding", callback_data="fwd:root"),
+            types.InlineKeyboardButton(text="⚙️ Settings", callback_data="menu:settings"),
+        ],
+        [
+            types.InlineKeyboardButton(text="📊 Analytics", callback_data="menu:analytics"),
+            types.InlineKeyboardButton(text="❓ Help", callback_data="menu:help"),
+        ],
+    ]
+    dashboard_url = get_settings().dashboard_url
+    if dashboard_url:
+        rows.append(
+            [types.InlineKeyboardButton(text="📊 Dashboard", web_app=types.WebAppInfo(url=dashboard_url))]
+        )
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def nav_kb(rows: list[list[tuple[str, str]]]) -> types.InlineKeyboardMarkup:
