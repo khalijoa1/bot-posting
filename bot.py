@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -42,6 +42,17 @@ async def main() -> None:
 
     bot = Bot(token=settings_obj.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
+
+    if settings_obj.dashboard_url:
+        try:
+            await bot.set_chat_menu_button(
+                menu_button=types.MenuButtonWebApp(
+                    text="📊 Dashboard",
+                    web_app=types.WebAppInfo(url=settings_obj.dashboard_url),
+                )
+            )
+        except Exception:
+            logging.exception("Failed to set dashboard menu button")
 
     dp.update.outer_middleware(AllowlistMiddleware())
 
