@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     # enough to view channel/post data.
     dashboard_token: str = ""
 
+    # Full URL (including the ?key= token) of the dashboard - used to
+    # attach it to the bot as a Telegram Web App (menu button + main-menu
+    # button) in bot.py/handlers/common.py. Empty means no Web App button
+    # is shown - the dashboard still works by direct URL either way.
+    dashboard_url: str = ""
+
     @property
     def allowed_user_id_set(self) -> set[int]:
         return {int(uid.strip()) for uid in self.allowed_user_ids.split(",") if uid.strip()}
