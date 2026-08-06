@@ -1,6 +1,7 @@
 import logging
 import re
 from collections.abc import AsyncIterator
+from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -221,6 +222,45 @@ async def init_db() -> None:
                         src_id, identifier, cleaned,
                     )
 
+        # One-time data repair: recurring posts with status='sent' but no
+        # sent_at timestamps on their post_targets (from a crash) need to be
+        # recycled back to 'scheduled' so the background scheduler can pick
+        # them up again. Two categories of stuck rows:
+        # 1. status='sent', repeat_interval_seconds IS NOT NULL,
+        #    auto_delete_seconds IS NULL, and all post_targets have
+        #    sent_at IS NULL (targets cleared by crash, post never flipped).
+        # 2. status='sent', repeat_interval_seconds IS NOT NULL,
+        #    delete_at IS NOT NULL and far in the past (delete/recycle
+        #    cycle never completed).
+        result8 = await conn.exec_driver_sql(
+            """
+            SELECT p.id FROM posts p
+            WHERE p.status = 'sent'
+              AND p.repeat_interval_seconds IS NOT NULL
+              AND (
+                (p.auto_delete_seconds IS NULL AND NOT EXISTS (
+                  SELECT 1 FROM post_targets pt
+                  WHERE pt.post_id = p.id AND pt.sent_at IS NOT NULL
+                ))
+                OR
+                (p.delete_at IS NOT NULL AND p.delete_at < datetime('now', '-1 day'))
+              )
+            """
+        )
+        stuck_ids = [r[0] for r in result8.fetchall()]
+        if stuck_ids:
+            now = datetime.utcnow()
+            for post_id in stuck_ids:
+                await conn.exec_driver_sql(
+                    "UPDATE posts SET status = 'scheduled', scheduled_time = ? WHERE id = ?",
+                    (now, post_id),
+                )
+            logger.info(
+                "Repaired %d stuck recurring posts (status='sent' with no progress): reset to 'scheduled'",
+                len(stuck_ids),
+            )
+
 
 def session() -> AsyncSession:
     return async_session_factory()
+
