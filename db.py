@@ -1,6 +1,7 @@
 import logging
 import re
 from collections.abc import AsyncIterator
+from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -212,7 +213,7 @@ async def init_db() -> None:
                     # added as "@bnnkenya" and another, separately, as
                     # "https://t.me/bnnkenya"), normalizing this row would
                     # collide with that existing row. Leave this one as-is
-                    # rather than crash-looping the whole bot on startup;
+                    # rather than crash-loop the whole bot on startup;
                     # it'll show up as a duplicate the operator can remove
                     # by hand via Forwarding -> Remove Source.
                     logger.warning(
@@ -221,6 +222,39 @@ async def init_db() -> None:
                         src_id, identifier, cleaned,
                     )
 
+        # One-time data repair: a bug in services/scheduler.py's
+        # run_post_send_loop (now fixed) unconditionally marked a repeating
+        # post SENT even when every target failed to send, leaving it with
+        # no sent_at anywhere. run_scheduler_loop's recycle query for
+        # no-auto-delete repeaters keys off max(target.sent_at), so a post
+        # with none got skipped forever - permanently stuck, invisible to
+        # the operator since it's neither SCHEDULED (editable/cancelable)
+        # nor genuinely SENT (nothing was ever posted). This resets any
+        # such row back to SCHEDULED with scheduled_time=now so the normal
+        # send loop picks it up on its next pass, same as a freshly
+        # composed post.
+        result8 = await conn.exec_driver_sql(
+            "SELECT id FROM posts WHERE status = 'sent' AND repeat_interval_seconds IS NOT NULL "
+            "AND auto_delete_seconds IS NULL AND id NOT IN "
+            "(SELECT DISTINCT post_id FROM post_targets WHERE sent_at IS NOT NULL)"
+        )
+        stuck_ids = [r[0] for r in result8.fetchall()]
+        if stuck_ids:
+            now_str = datetime.utcnow().isoformat(sep=" ")
+            for pid in stuck_ids:
+                await conn.exec_driver_sql(
+                    "UPDATE post_targets SET message_id = NULL, extra_message_ids = NULL, "
+                    "sent_at = NULL WHERE post_id = ?",
+                    (pid,),
+                )
+                await conn.exec_driver_sql(
+                    "UPDATE posts SET status = 'scheduled', scheduled_time = ?, delete_at = NULL "
+                    "WHERE id = ?",
+                    (now_str, pid),
+                )
+            logger.warning("Resumed %d stuck repeating post(s): %s", len(stuck_ids), stuck_ids)
+
 
 def session() -> AsyncSession:
     return async_session_factory()
+
