@@ -10,6 +10,7 @@ and a logged-in session. Run `python scripts/telethon_login.py` once locally
 to generate TELETHON_SESSION_STRING. If those aren't configured, this feature
 is simply skipped - the rest of the bot works fine without it.
 """
+import asyncio
 import logging
 
 from aiogram import Bot
@@ -81,7 +82,7 @@ async def run_userbot(bot: Bot) -> None:
     await client.run_until_disconnected()
 
 
-async def approve_pending_join_requests(chat_id: int) -> tuple[int, str | None]:
+async def approve_pending_join_requests(chat_id: int) -> tuple[int, int, str | None]:
     """Bulk-approve every currently pending join request for `chat_id`,
     including ones submitted before the bot (or this userbot account) was
     ever made an admin there.
@@ -111,7 +112,7 @@ async def approve_pending_join_requests(chat_id: int) -> tuple[int, str | None]:
             "requests requires it; the Bot API can't list them on its own."
         )
 
-    from telethon.errors import RPCError
+    from telethon.errors import FloodWaitError, RPCError
     from telethon.tl.functions.messages import (
         GetChatInviteImportersRequest,
         HideChatJoinRequestRequest,
@@ -128,6 +129,7 @@ async def approve_pending_join_requests(chat_id: int) -> tuple[int, str | None]:
         )
 
     approved = 0
+    failed = 0
     offset_date = 0
     offset_user = InputUserEmpty()
 
@@ -141,10 +143,17 @@ async def approve_pending_join_requests(chat_id: int) -> tuple[int, str | None]:
                 offset_user=offset_user,
                 limit=100,
             ))
+        except FloodWaitError as e:
+            logger.warning(
+                "Flood wait listing pending requests for chat_id=%s - waiting %ss",
+                chat_id, e.seconds,
+            )
+            await asyncio.sleep(e.seconds + 1)
+            continue
         except RPCError as e:
-            return approved, f"Telegram rejected the request while listing pending requests: {e}"
+            return approved, failed, f"Telegram rejected the request while listing pending requests: {e}"
         except Exception as e:
-            return approved, f"Failed to list pending join requests: {e}"
+            return approved, failed, f"Failed to list pending join requests: {e}"
 
         if not result.importers:
             break
@@ -154,18 +163,43 @@ async def approve_pending_join_requests(chat_id: int) -> tuple[int, str | None]:
             user = users_by_id.get(importer.user_id)
             if user is None:
                 continue
-            try:
-                await _client(HideChatJoinRequestRequest(
-                    peer=peer,
-                    user_id=InputUser(user_id=user.id, access_hash=user.access_hash),
-                    approved=True,
-                ))
-                approved += 1
-            except Exception:
-                logger.exception(
-                    "Failed to approve backlog join request user_id=%s in chat_id=%s",
-                    importer.user_id, chat_id,
-                )
+
+            # Telegram tightly rate-limits approving join requests in bulk -
+            # without pacing these out and retrying on flood waits, a channel
+            # with more than a handful of pending requests hit a flood wait
+            # partway through and every approval after that point failed
+            # silently, which is why backlog-approve used to only get through
+            # a fraction of the list.
+            for attempt in range(4):
+                try:
+                    await _client(HideChatJoinRequestRequest(
+                        peer=peer,
+                        user_id=InputUser(user_id=user.id, access_hash=user.access_hash),
+                        approved=True,
+                    ))
+                    approved += 1
+                    break
+                except FloodWaitError as e:
+                    wait = e.seconds + 1
+                    logger.warning(
+                        "Flood wait approving user_id=%s in chat_id=%s - waiting %ss (attempt %s/4)",
+                        importer.user_id, chat_id, wait, attempt + 1,
+                    )
+                    await asyncio.sleep(wait)
+                except Exception:
+                    logger.exception(
+                        "Failed to approve backlog join request user_id=%s in chat_id=%s",
+                        importer.user_id, chat_id,
+                    )
+                    failed += 1
+                    break
+            else:
+                # Ran out of retries after repeated flood waits.
+                failed += 1
+
+            # Pace even successful approvals so we don't immediately run
+            # back into the same rate limit on the next one.
+            await asyncio.sleep(0.5)
 
         if len(result.importers) < 100:
             break
@@ -176,7 +210,7 @@ async def approve_pending_join_requests(chat_id: int) -> tuple[int, str | None]:
             access_hash=users_by_id[last.user_id].access_hash,
         )
 
-    return approved, None
+    return approved, failed, None
 
 
 async def scan_group_backlog_links(bot, chat_id: int, link_policy) -> dict:
