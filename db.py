@@ -251,6 +251,45 @@ async def init_db() -> None:
                 )
             logger.warning("Resumed %d stuck repeating post(s): %s", len(stuck_ids), stuck_ids)
 
+        # TEMPORARY one-off kickstart: operator-requested on 2026-08-06 to force
+        # every repeating post to send immediately on next startup. This block
+        # resets scheduled_time for all existing scheduled repeaters to NOW,
+        # and clears sent_at from any sent repeaters to force re-send via
+        # delete+recycle cycle. Will be reverted in the next commit.
+        now_str2 = datetime.utcnow().isoformat(sep=" ")
+        res_a = await conn.exec_driver_sql(
+            "SELECT id FROM posts WHERE status = 'scheduled' AND repeat_interval_seconds IS NOT NULL"
+        )
+        ids_a = [r[0] for r in res_a.fetchall()]
+        for pid in ids_a:
+            await conn.exec_driver_sql("UPDATE posts SET scheduled_time = ? WHERE id = ?", (now_str2, pid))
+        res_b = await conn.exec_driver_sql(
+            "SELECT id FROM posts WHERE status = 'sent' AND repeat_interval_seconds IS NOT NULL "
+            "AND auto_delete_seconds IS NULL"
+        )
+        ids_b = [r[0] for r in res_b.fetchall()]
+        for pid in ids_b:
+            await conn.exec_driver_sql(
+                "UPDATE post_targets SET message_id = NULL, extra_message_ids = NULL, sent_at = NULL WHERE post_id = ?",
+                (pid,),
+            )
+            await conn.exec_driver_sql(
+                "UPDATE posts SET status = 'scheduled', scheduled_time = ?, delete_at = NULL WHERE id = ?",
+                (now_str2, pid),
+            )
+        res_c = await conn.exec_driver_sql(
+            "SELECT id FROM posts WHERE status = 'sent' AND repeat_interval_seconds IS NOT NULL "
+            "AND auto_delete_seconds IS NOT NULL"
+        )
+        ids_c = [r[0] for r in res_c.fetchall()]
+        for pid in ids_c:
+            await conn.exec_driver_sql("UPDATE posts SET delete_at = ? WHERE id = ?", (now_str2, pid))
+        if ids_a or ids_b or ids_c:
+            logger.warning(
+                "Kickstarted repeating posts - immediate: %s, via delete+recycle: %s",
+                ids_a + ids_b, ids_c,
+            )
+
 
 def session() -> AsyncSession:
     return async_session_factory()
