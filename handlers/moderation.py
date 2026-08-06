@@ -15,6 +15,7 @@ against the group's rules and acted on automatically.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from collections import defaultdict, deque
@@ -27,8 +28,38 @@ from sqlalchemy import select
 from config import get_settings
 from db import session
 from models import LinkPolicy, ModeratedGroup, SpamAction
+from services.telethon_client import scan_group_backlog_links
 
 router = Router()
+
+
+async def _run_backlog_scan_and_notify(
+    bot, chat_id: int, title: str, operator_id: int,
+    link_policy: LinkPolicy = LinkPolicy.DELETE_INVITES_ADS,
+) -> None:
+    """Runs scan_group_backlog_links in the background and DMs the result
+    to whoever triggered it. Used both right after auto-registration (with
+    the default link policy, since settings haven't been touched yet - see
+    group_admin_added below) and from the manual "Scan Backlog Links"
+    button in group settings (with whatever policy is currently
+    configured). This is what actually satisfies moderating a group's
+    prior conversation history the moment the bot becomes admin - the Bot
+    API itself can't see messages from before that point, so
+    scan_group_backlog_links borrows the Telethon userbot to read them.
+    """
+    result = await scan_group_backlog_links(bot, chat_id, link_policy)
+    if "error" in result:
+        text = f"\U0001f9f9 Backlog scan for {title} didn't complete:\n\n{result['error']}"
+    else:
+        text = (
+            f"\U0001f9f9 Backlog scan complete for {title}\n\n"
+            f"Scanned: {result['scanned']} old messages\n"
+            f"Deleted: {result['deleted']} (matched the link policy)"
+        )
+    try:
+        await bot.send_message(operator_id, text)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +123,13 @@ async def group_admin_added(update: types.ChatMemberUpdated) -> None:
         # Operator hasn't opened a DM with the bot yet - registration still
         # succeeded, they'll see it in /list_groups.
         pass
+
+    # Retroactively scan this group's pre-admin message history for link
+    # violations right away, in the background, so the operator doesn't
+    # have to trigger it by hand.
+    asyncio.create_task(
+        _run_backlog_scan_and_notify(update.bot, chat.id, chat.title or str(chat.id), actor.id)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +278,7 @@ def _group_settings_kb(g: ModeratedGroup) -> types.InlineKeyboardMarkup:
                 text=f"{_mark(g.spam_action, SpamAction.DELETE_KICK)} Delete + kick immediately",
                 callback_data=f"modspam_{g.id}_delete_kick"
             )],
+            [types.InlineKeyboardButton(text="🧹 Scan Backlog Links", callback_data=f"modscan_{g.id}")],
             [types.InlineKeyboardButton(text="— 📨 Messages —", callback_data="modnoop")],
             # Both open screens defined in handlers/group_messages.py
             # (gwelcome_/grecur_ callback prefixes) - that module is
@@ -358,6 +397,25 @@ async def set_spam_action(query: types.CallbackQuery):
 async def close_settings(query: types.CallbackQuery):
     await query.message.edit_text("✅ Moderation settings saved.")
     await query.answer()
+
+
+@router.callback_query(F.data.startswith("modscan_"))
+async def trigger_backlog_scan(query: types.CallbackQuery):
+    """Manual re-run of the backlog link scan, e.g. after changing the
+    Link policy or if the automatic post-registration scan failed because
+    the userbot wasn't connected/a member yet at the time."""
+    gid = int(query.data.replace("modscan_", ""))
+    async with session() as s:
+        g = await s.get(ModeratedGroup, gid)
+        if not g:
+            await query.answer("Not found", show_alert=True)
+            return
+        chat_id, title, link_policy = g.chat_id, g.title, g.link_policy
+
+    await query.answer("Scanning in the background - you'll get a DM when it's done", show_alert=True)
+    asyncio.create_task(
+        _run_backlog_scan_and_notify(query.bot, chat_id, title, query.from_user.id, link_policy)
+    )
 
 
 @router.callback_query(F.data == "modnoop")
