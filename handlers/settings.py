@@ -191,7 +191,7 @@ async def approve_backlog(query: types.CallbackQuery):
     await query.answer("Working on it - checking for pending requests...")
 
     from services.telethon_client import approve_pending_join_requests
-    approved, error = await approve_pending_join_requests(chat_id)
+    approved, failed, error = await approve_pending_join_requests(chat_id)
 
     if error:
         await query.message.answer(
@@ -199,10 +199,13 @@ async def approve_backlog(query: types.CallbackQuery):
         )
         return
 
-    if approved == 0:
+    if approved == 0 and failed == 0:
         await query.message.answer(f"✅ {title}: no pending join requests found - nothing to do.")
     else:
-        await query.message.answer(f"✅ {title}: approved {approved} pending join request(s).")
+        text = f"✅ {title}: approved {approved} pending join request(s)."
+        if failed:
+            text += f"\n⚠️ {failed} couldn't be approved even after retries - check logs for details."
+        await query.message.answer(text)
 
 
 @router.callback_query(F.data.startswith("setwelcome_"))
