@@ -251,6 +251,53 @@ async def init_db() -> None:
                 )
             logger.warning("Resumed %d stuck repeating post(s): %s", len(stuck_ids), stuck_ids)
 
+        # TEMPORARY one-off (operator-requested): kickstart every repeating
+        # post to send again right now and resume its normal cycle from
+        # that point. Split into three groups so nothing gets orphaned in
+        # a live channel:
+        # - already SCHEDULED: just pull scheduled_time up to now.
+        # - SENT with no auto-delete: reset straight to a fresh SCHEDULED
+        # post (safe - these posts already just accumulate copies every
+        # normal cycle anyway).
+        # - SENT WITH auto-delete configured: do NOT clear targets
+        # directly (would orphan the still-live message - we only have
+        # DB access, not the bot's delete API here). Instead set
+        # delete_at=now so the running scheduler's normal delete+recycle
+        # branch handles it via the real Telegram API, then recycles.
+        now_str2 = datetime.utcnow().isoformat(sep=" ")
+        res_a = await conn.exec_driver_sql(
+            "SELECT id FROM posts WHERE status = 'scheduled' AND repeat_interval_seconds IS NOT NULL"
+        )
+        ids_a = [r[0] for r in res_a.fetchall()]
+        for pid in ids_a:
+            await conn.exec_driver_sql("UPDATE posts SET scheduled_time = ? WHERE id = ?", (now_str2, pid))
+        res_b = await conn.exec_driver_sql(
+            "SELECT id FROM posts WHERE status = 'sent' AND repeat_interval_seconds IS NOT NULL "
+            "AND auto_delete_seconds IS NULL"
+        )
+        ids_b = [r[0] for r in res_b.fetchall()]
+        for pid in ids_b:
+            await conn.exec_driver_sql(
+                "UPDATE post_targets SET message_id = NULL, extra_message_ids = NULL, sent_at = NULL WHERE post_id = ?",
+                (pid,),
+            )
+            await conn.exec_driver_sql(
+                "UPDATE posts SET status = 'scheduled', scheduled_time = ?, delete_at = NULL WHERE id = ?",
+                (now_str2, pid),
+            )
+        res_c = await conn.exec_driver_sql(
+            "SELECT id FROM posts WHERE status = 'sent' AND repeat_interval_seconds IS NOT NULL "
+            "AND auto_delete_seconds IS NOT NULL"
+        )
+        ids_c = [r[0] for r in res_c.fetchall()]
+        for pid in ids_c:
+            await conn.exec_driver_sql("UPDATE posts SET delete_at = ? WHERE id = ?", (now_str2, pid))
+        if ids_a or ids_b or ids_c:
+            logger.warning(
+                "Kickstarted repeating posts - immediate (scheduled/no-delete): %s, via delete+recycle (auto-delete live posts): %s",
+                ids_a + ids_b, ids_c,
+            )
+
 
 def session() -> AsyncSession:
     return async_session_factory()
