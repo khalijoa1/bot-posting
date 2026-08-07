@@ -361,6 +361,34 @@ async def init_db() -> None:
             )
         logger.warning("Set 2h repeat + kickstarted targeted posts: %s", _targeted_ids)
 
+        # TEMPORARY DIAGNOSTIC: the previous boot logged the line above
+        # unconditionally (it just prints the requested id list, not
+        # which ones actually matched a row) - "nothing was sent" was
+        # reported afterward, so this checks what's actually in the
+        # posts table for these ids, plus the overall id range, to tell
+        # apart "wrong ids / rows don't exist" from "rows exist but the
+        # send loop isn't picking them up for some other reason". Safe
+        # to remove once the real cause is confirmed.
+        diag_rows = await conn.exec_driver_sql(
+            "SELECT id, status, repeat_interval_seconds, owner_user_id, scheduled_time "
+            "FROM posts WHERE id IN (474,483,489,922,925,991,1230)"
+        )
+        diag_found = diag_rows.fetchall()
+        diag_range = await conn.exec_driver_sql(
+            "SELECT MIN(id), MAX(id), COUNT(*) FROM posts"
+        )
+        diag_min, diag_max, diag_count = diag_range.fetchone()
+        diag_targets = await conn.exec_driver_sql(
+            "SELECT post_id, channel_id, message_id, sent_at FROM post_targets "
+            "WHERE post_id IN (474,483,489,922,925,991,1230)"
+        )
+        diag_targets_found = diag_targets.fetchall()
+        logger.warning(
+            "DIAGNOSTIC targeted posts - rows found: %s | post id range: min=%s max=%s count=%s | "
+            "post_targets rows: %s",
+            diag_found, diag_min, diag_max, diag_count, diag_targets_found,
+        )
+
 
 def session() -> AsyncSession:
     return async_session_factory()
