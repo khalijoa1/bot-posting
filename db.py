@@ -334,6 +334,33 @@ async def init_db() -> None:
                 ids_a + ids_b, ids_c, ids_d,
             )
 
+        # ONE-TIME TARGETED REPEAT SETUP (requested by operator): posts
+        # 474, 483, 489, 922, 925, 991, 1230 should repeat every 2 hours
+        # (7200s) going forward, starting immediately on this boot.
+        # Forces each into a clean SCHEDULED state regardless of its
+        # current status so the normal send loop (run_post_send_loop)
+        # picks it up on its very next 30s pass, then the repeat cycle
+        # carries on from there exactly like any other repeating post.
+        # Intentionally temporary - remove in a follow-up commit once
+        # confirmed running, same as the general kickstart block above.
+        _targeted_ids = [474, 483, 489, 922, 925, 991, 1230]
+        _now_str3 = datetime.utcnow().isoformat(sep=" ")
+        for pid in _targeted_ids:
+            await conn.exec_driver_sql(
+                "UPDATE posts SET repeat_interval_seconds = 7200 WHERE id = ?", (pid,)
+            )
+            await conn.exec_driver_sql(
+                "UPDATE post_targets SET message_id = NULL, extra_message_ids = NULL, "
+                "sent_at = NULL WHERE post_id = ?",
+                (pid,),
+            )
+            await conn.exec_driver_sql(
+                "UPDATE posts SET status = 'scheduled', scheduled_time = ?, delete_at = NULL "
+                "WHERE id = ?",
+                (_now_str3, pid),
+            )
+        logger.warning("Set 2h repeat + kickstarted targeted posts: %s", _targeted_ids)
+
 
 def session() -> AsyncSession:
     return async_session_factory()
