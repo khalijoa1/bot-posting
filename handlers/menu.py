@@ -281,7 +281,7 @@ async def act_post_category(query: types.CallbackQuery, state: FSMContext):
 async def act_myposts(query: types.CallbackQuery):
     from handlers.posts import list_posts
     await query.answer()
-    await list_posts(query.message)
+   await list_posts(query.message, user_id=query.from_user.id)
     await query.message.answer("⬅️ Back to menu:", reply_markup=BACK_ONLY_KB)
 
 
