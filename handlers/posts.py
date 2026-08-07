@@ -44,15 +44,15 @@ async def list_posts(message: types.Message, user_id: int | None = None):
 
     if not posts:
         await message.answer(
-            "━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━\n"
             "📋 MY POSTS\n"
-            "━━━━━━━━━━━━━━━━━\n\n"
+            "━━━━━━━━━━━━━━━━\n\n"
             "❌ No posts yet\n\n"
             "Use /compose to create a post"
         )
         return
 
-    text = "━━━━━━━━━━━━━━━━━\n📋 MY POSTS\n━━━━━━━━━━━━━━━━━\n\n"
+    text = "━━━━━━━━━━━━━━━━\n📋 MY POSTS\n━━━━━━━━━━━━━━━━━\n\n"
 
     for p in posts:
         async with session() as s:
@@ -133,7 +133,7 @@ async def get_post_id(message: types.Message, state: FSMContext):
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Post ID: {post_id}\n"
         f"Channels: {len(targets)}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"Send the NEW TEXT (or new caption, if this is a photo/video/album post):\n"
         f"(Will update in all {len(targets)} channels. For an album, only the "
         f"first item's caption is changed, since that's the only one Telegram "
@@ -237,21 +237,136 @@ async def cancel_delete(message: types.Message, state: FSMContext):
 
 
 @router.message(DeleteState.post_id, F.text)
-async def confirm_delete(message: types.Message, state: FSMContext):
-    """Delete the post's messages from every channel and mark it deleted."""
+async def choose_delete_target(message: types.Message, state: FSMContext):
+    """After sending a Post ID, choose whether to delete the post from
+    every channel, or from just one channel of your choosing - the latter
+    is what lets you stop a repeating post from posting into ONE channel
+    while it keeps cycling normally everywhere else, instead of having to
+    kill the whole post."""
     try:
         post_id = int(message.text.strip())
     except ValueError:
         await message.answer("❌ Invalid ID. Send a number", reply_markup=_cancel_kb())
         return
 
-    bot = message.bot
-
     async with session() as s:
         post = await s.get(Post, post_id)
         if not post or post.owner_user_id != message.from_user.id:
             await message.answer("❌ Post not found or not yours", reply_markup=main_menu_kb())
             await state.clear()
+            return
+
+        tq = select(PostTarget).where(PostTarget.post_id == post_id).options(selectinload(PostTarget.channel))
+        tres = await s.execute(tq)
+        targets = tres.scalars().all()
+        repeats = post.repeat_interval_seconds is not None
+
+    if not targets:
+        await message.answer("❌ No active channels for this post", reply_markup=main_menu_kb())
+        await state.clear()
+        return
+
+    rows = [
+        [types.InlineKeyboardButton(
+            text=f"🗑️ Remove from {t.channel.title}",
+            callback_data=f"delch_{post_id}_{t.channel_id}"
+        )]
+        for t in targets
+    ]
+    rows.append([types.InlineKeyboardButton(text="🗑️ Delete from ALL channels", callback_data=f"delall_{post_id}")])
+    rows.append([types.InlineKeyboardButton(text="🔙 Cancel", callback_data="delcancel")])
+
+    repeat_note = (
+        "\n🔁 This post repeats - removing just one channel keeps it "
+        "cycling normally in the rest."
+        if repeats else ""
+    )
+    await message.answer(
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Post ID: {post_id}\n"
+        f"Channels: {len(targets)}{repeat_note}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Choose what to remove:",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=rows)
+    )
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("delch_"))
+async def delete_from_one_channel(query: types.CallbackQuery):
+    """Remove this post from exactly one channel. If that was the last
+    channel it was still targeting, the whole post is marked DELETED -
+    otherwise it stays active (and keeps repeating, if it's a repeating
+    post) in every channel that wasn't removed."""
+    _, post_id_s, channel_id_s = query.data.split("_")
+    post_id, channel_id = int(post_id_s), int(channel_id_s)
+    bot = query.bot
+
+    async with session() as s:
+        post = await s.get(Post, post_id)
+        if not post or post.owner_user_id != query.from_user.id:
+            await query.answer("Not found or not yours", show_alert=True)
+            return
+
+        tq = select(PostTarget).where(
+            PostTarget.post_id == post_id, PostTarget.channel_id == channel_id
+        ).options(selectinload(PostTarget.channel))
+        tres = await s.execute(tq)
+        target = tres.scalars().first()
+        if not target:
+            await query.answer("Already removed", show_alert=True)
+            return
+
+        title = target.channel.title
+        ids = [target.message_id] if target.message_id is not None else []
+        if target.extra_message_ids:
+            try:
+                ids.extend(json.loads(target.extra_message_ids))
+            except Exception:
+                pass
+
+        deleted_ok = True
+        for mid in ids:
+            try:
+                await bot.delete_message(chat_id=target.channel.chat_id, message_id=mid)
+            except Exception:
+                deleted_ok = False
+
+        await s.delete(target)
+
+        remaining_q = select(PostTarget).where(PostTarget.post_id == post_id)
+        remaining_res = await s.execute(remaining_q)
+        remaining_count = len(remaining_res.scalars().all())
+        fully_deleted = remaining_count == 0
+        if fully_deleted:
+            post.status = PostStatus.DELETED
+
+        await s.commit()
+
+    note = "" if deleted_ok else "\n⚠️ Message may have already been removed from Telegram."
+    await query.answer()
+    if fully_deleted:
+        await query.message.edit_text(
+            f"✅ Removed from {title} - that was the last channel, so the "
+            f"post is now fully deleted.{note}"
+        )
+    else:
+        await query.message.edit_text(
+            f"✅ Removed from {title}. Still active in {remaining_count} "
+            f"other channel(s).{note}"
+        )
+
+
+@router.callback_query(F.data.startswith("delall_"))
+async def delete_from_all_channels(query: types.CallbackQuery):
+    """Delete the post from every channel it targets."""
+    post_id = int(query.data.replace("delall_", ""))
+    bot = query.bot
+
+    async with session() as s:
+        post = await s.get(Post, post_id)
+        if not post or post.owner_user_id != query.from_user.id:
+            await query.answer("Not found or not yours", show_alert=True)
             return
 
         tq = select(PostTarget).where(PostTarget.post_id == post_id).options(selectinload(PostTarget.channel))
@@ -287,8 +402,15 @@ async def confirm_delete(message: types.Message, state: FSMContext):
     if failed:
         result += f"\n\n❌ Failed:\n" + "\n".join([f" • {c}" for c in failed])
 
-    await message.answer(result, reply_markup=main_menu_kb())
-    await state.clear()
+    await query.answer()
+    await query.message.edit_text(result)
+
+
+@router.callback_query(F.data == "delcancel")
+async def cancel_delete_cb(query: types.CallbackQuery):
+    """Cancel from the per-channel delete-choice keyboard."""
+    await query.answer()
+    await query.message.edit_text("❌ Cancelled")
 
 
 @router.message(lambda msg: msg.text == "📋 View My Posts")
