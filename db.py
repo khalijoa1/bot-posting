@@ -229,8 +229,22 @@ async def init_db() -> None:
         # with none got skipped forever - permanently stuck. This resets
         # any such row back to SCHEDULED with scheduled_time=now so the
         # normal send loop picks it up on its next pass.
+        # NOTE ON STATUS LITERALS: models.Post.status is a SQLAlchemy
+        # Enum(PostStatus) column. SQLAlchemy's Enum type, unless given
+        # values_callable, stores/compares using the Python enum MEMBER
+        # NAME ("SCHEDULED", "SENT", "DELETED", ...) - NOT PostStatus's
+        # str .value ("scheduled", "sent", "deleted") - even though
+        # PostStatus happens to subclass str. Confirmed empirically: the
+        # ORM's own compiled query for run_post_send_loop literal-binds
+        # `posts.status = 'SCHEDULED'` (uppercase). Every raw-SQL status
+        # literal below MUST use the uppercase member-name form to match
+        # what the app's real ORM queries look for - a previous version of
+        # this migration used lowercase 'scheduled'/'sent'/'deleted',
+        # which silently wrote/matched rows the send loop's own query
+        # could never see (this was the root cause of a "nothing was
+        # sent" report after an operator-requested kickstart).
         result8 = await conn.exec_driver_sql(
-            "SELECT id FROM posts WHERE status = 'sent' AND repeat_interval_seconds IS NOT NULL "
+            "SELECT id FROM posts WHERE status = 'SENT' AND repeat_interval_seconds IS NOT NULL "
             "AND auto_delete_seconds IS NULL AND id NOT IN "
             "(SELECT DISTINCT post_id FROM post_targets WHERE sent_at IS NOT NULL)"
         )
@@ -244,7 +258,7 @@ async def init_db() -> None:
                     (pid,),
                 )
                 await conn.exec_driver_sql(
-                    "UPDATE posts SET status = 'scheduled', scheduled_time = ?, delete_at = NULL "
+                    "UPDATE posts SET status = 'SCHEDULED', scheduled_time = ?, delete_at = NULL "
                     "WHERE id = ?",
                     (now_str, pid),
                 )
@@ -262,7 +276,7 @@ async def init_db() -> None:
         # scheduled_time to now so the normal send loop picks them up on
         # its next pass instead of waiting.
         res_a = await conn.exec_driver_sql(
-            "SELECT id FROM posts WHERE status = 'scheduled' AND repeat_interval_seconds IS NOT NULL"
+            "SELECT id FROM posts WHERE status = 'SCHEDULED' AND repeat_interval_seconds IS NOT NULL"
         )
         ids_a = [r[0] for r in res_a.fetchall()]
         for pid in ids_a:
@@ -275,7 +289,7 @@ async def init_db() -> None:
         # resend immediately, same recycle path used for the stuck-post
         # repair above.
         res_b = await conn.exec_driver_sql(
-            "SELECT id FROM posts WHERE status = 'sent' AND repeat_interval_seconds IS NOT NULL "
+            "SELECT id FROM posts WHERE status = 'SENT' AND repeat_interval_seconds IS NOT NULL "
             "AND auto_delete_seconds IS NULL"
         )
         ids_b = [r[0] for r in res_b.fetchall()]
@@ -286,7 +300,7 @@ async def init_db() -> None:
                 (pid,),
             )
             await conn.exec_driver_sql(
-                "UPDATE posts SET status = 'scheduled', scheduled_time = ?, delete_at = NULL "
+                "UPDATE posts SET status = 'SCHEDULED', scheduled_time = ?, delete_at = NULL "
                 "WHERE id = ?",
                 (now_str2, pid),
             )
@@ -296,7 +310,7 @@ async def init_db() -> None:
         # their delete_at to now so that path fires immediately instead of
         # waiting out the rest of the auto-delete window.
         res_c = await conn.exec_driver_sql(
-            "SELECT id FROM posts WHERE status = 'sent' AND repeat_interval_seconds IS NOT NULL "
+            "SELECT id FROM posts WHERE status = 'SENT' AND repeat_interval_seconds IS NOT NULL "
             "AND auto_delete_seconds IS NOT NULL"
         )
         ids_c = [r[0] for r in res_c.fetchall()]
@@ -313,7 +327,7 @@ async def init_db() -> None:
         # clearly wanted it to keep looping - so it's revived the same
         # way as the SENT/no-auto-delete case, not left dead forever.
         res_d = await conn.exec_driver_sql(
-            "SELECT id FROM posts WHERE status = 'deleted' AND repeat_interval_seconds IS NOT NULL"
+            "SELECT id FROM posts WHERE status = 'DELETED' AND repeat_interval_seconds IS NOT NULL"
         )
         ids_d = [r[0] for r in res_d.fetchall()]
         for pid in ids_d:
@@ -323,7 +337,7 @@ async def init_db() -> None:
                 (pid,),
             )
             await conn.exec_driver_sql(
-                "UPDATE posts SET status = 'scheduled', scheduled_time = ?, delete_at = NULL "
+                "UPDATE posts SET status = 'SCHEDULED', scheduled_time = ?, delete_at = NULL "
                 "WHERE id = ?",
                 (now_str2, pid),
             )
@@ -355,38 +369,31 @@ async def init_db() -> None:
                 (pid,),
             )
             await conn.exec_driver_sql(
-                "UPDATE posts SET status = 'scheduled', scheduled_time = ?, delete_at = NULL "
+                "UPDATE posts SET status = 'SCHEDULED', scheduled_time = ?, delete_at = NULL "
                 "WHERE id = ?",
                 (_now_str3, pid),
             )
         logger.warning("Set 2h repeat + kickstarted targeted posts: %s", _targeted_ids)
 
-        # TEMPORARY DIAGNOSTIC: the previous boot logged the line above
-        # unconditionally (it just prints the requested id list, not
-        # which ones actually matched a row) - "nothing was sent" was
-        # reported afterward, so this checks what's actually in the
-        # posts table for these ids, plus the overall id range, to tell
-        # apart "wrong ids / rows don't exist" from "rows exist but the
-        # send loop isn't picking them up for some other reason". Safe
-        # to remove once the real cause is confirmed.
+        # TEMPORARY DIAGNOSTIC: confirms the case-sensitivity fix above
+        # actually landed - shows each targeted post's real status value
+        # plus an overall status breakdown for the whole table, so it's
+        # obvious whether rows now read 'SCHEDULED' (matching what
+        # run_post_send_loop's ORM query looks for) instead of the old
+        # lowercase 'scheduled' that never matched anything. Safe to
+        # remove once confirmed.
         diag_rows = await conn.exec_driver_sql(
             "SELECT id, status, repeat_interval_seconds, owner_user_id, scheduled_time "
             "FROM posts WHERE id IN (474,483,489,922,925,991,1230)"
         )
         diag_found = diag_rows.fetchall()
-        diag_range = await conn.exec_driver_sql(
-            "SELECT MIN(id), MAX(id), COUNT(*) FROM posts"
+        diag_breakdown = await conn.exec_driver_sql(
+            "SELECT status, COUNT(*) FROM posts GROUP BY status"
         )
-        diag_min, diag_max, diag_count = diag_range.fetchone()
-        diag_targets = await conn.exec_driver_sql(
-            "SELECT post_id, channel_id, message_id, sent_at FROM post_targets "
-            "WHERE post_id IN (474,483,489,922,925,991,1230)"
-        )
-        diag_targets_found = diag_targets.fetchall()
+        diag_breakdown_rows = diag_breakdown.fetchall()
         logger.warning(
-            "DIAGNOSTIC targeted posts - rows found: %s | post id range: min=%s max=%s count=%s | "
-            "post_targets rows: %s",
-            diag_found, diag_min, diag_max, diag_count, diag_targets_found,
+            "DIAGNOSTIC targeted posts after case fix: %s | status breakdown across all posts: %s",
+            diag_found, diag_breakdown_rows,
         )
 
 
