@@ -137,6 +137,19 @@ async def run_post_send_loop(bot: Bot) -> None:
                 res = await s.execute(q)
                 posts = res.scalars().all()
 
+                # TEMPORARY DIAGNOSTIC: "nothing was sent" was reported for
+                # posts 474/483/489/922/925/991/1230 despite them showing
+                # status='scheduled' with a past scheduled_time in the DB -
+                # this logs the query's own view of `now` plus every post id
+                # + raw scheduled_time it actually matched, every single
+                # pass, so a query/type mismatch (vs. some other cause) is
+                # directly visible instead of inferred from absence of logs.
+                # Safe to remove once the real cause is confirmed.
+                logger.warning(
+                    "run_post_send_loop: now=%s matched %d post(s): %s",
+                    now, len(posts), [(p.id, p.scheduled_time) for p in posts],
+                )
+
                 for post in posts:
                     target_q = select(PostTarget).where(PostTarget.post_id == post.id).options(
                         selectinload(PostTarget.channel)
