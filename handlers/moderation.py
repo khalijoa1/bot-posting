@@ -1,4 +1,4 @@
-github.com/khalijoa1/bot-posting/edit/main/handlers/moderation.py"""Group moderation: link filtering and anti-spam, configurable per group.
+
 
 Setup (operator only, in private chat with the bot):
   1. Add the bot to your group as an admin with "Delete messages" and
