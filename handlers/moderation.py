@@ -1,4 +1,4 @@
-"""Group moderation: link filtering and anti-spam, configurable per group.
+github.com/khalijoa1/bot-posting/edit/main/handlers/moderation.py"""Group moderation: link filtering and anti-spam, configurable per group.
 
 Setup (operator only, in private chat with the bot):
   1. Add the bot to your group as an admin with "Delete messages" and
@@ -22,6 +22,7 @@ from collections import defaultdict, deque
 
 from aiogram import Router, types, F
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from sqlalchemy import select
 
@@ -242,7 +243,11 @@ async def remove_group(message: types.Message, command: CommandObject):
 
 
 def _mark(current, value) -> str:
-    return "🔘" if current == value else "⚪"
+    # Was "🔘"/"⚪" - two circle glyphs that look nearly identical at a
+    # glance (operator feedback: "hard to understand if they are on or
+    # off"). A filled checkmark vs. a hollow box reads unambiguously as
+    # selected/not-selected even at small size or a quick glance.
+    return "✅" if current == value else "▫️"
 
 
 def _group_settings_kb(g: ModeratedGroup) -> types.InlineKeyboardMarkup:
@@ -359,7 +364,15 @@ async def toggle_moderation(query: types.CallbackQuery):
         g.moderation_enabled = not g.moderation_enabled
         s.add(g)
         await s.commit()
-        await query.message.edit_reply_markup(reply_markup=_group_settings_kb(g))
+        try:
+            await query.message.edit_reply_markup(reply_markup=_group_settings_kb(g))
+        except TelegramBadRequest as e:
+            # "message is not modified" happens when the rebuilt keyboard
+            # is byte-for-byte identical to what's already shown - harmless,
+            # nothing for the operator to see changed. Any other Telegram
+            # error is a real problem and should still surface.
+            if "message is not modified" not in str(e):
+                raise
     await query.answer("Updated")
 
 
@@ -374,7 +387,17 @@ async def set_link_policy(query: types.CallbackQuery):
         g.link_policy = LinkPolicy(policy)
         s.add(g)
         await s.commit()
-        await query.message.edit_reply_markup(reply_markup=_group_settings_kb(g))
+        try:
+            await query.message.edit_reply_markup(reply_markup=_group_settings_kb(g))
+        except TelegramBadRequest as e:
+            # Confirmed live bug: tapping the option that's already
+            # selected re-renders an identical keyboard, Telegram rejects
+            # the no-op edit with "message is not modified", and that
+            # exception (previously uncaught) crashed the whole update
+            # before query.answer() below ever ran - so the tap appeared
+            # to do nothing at all. Swallow only this specific error.
+            if "message is not modified" not in str(e):
+                raise
     await query.answer("Updated")
 
 
@@ -389,7 +412,12 @@ async def set_spam_action(query: types.CallbackQuery):
         g.spam_action = SpamAction(action)
         s.add(g)
         await s.commit()
-        await query.message.edit_reply_markup(reply_markup=_group_settings_kb(g))
+        try:
+            await query.message.edit_reply_markup(reply_markup=_group_settings_kb(g))
+        except TelegramBadRequest as e:
+            # Same "message is not modified" case as set_link_policy above.
+            if "message is not modified" not in str(e):
+                raise
     await query.answer("Updated")
 
 
