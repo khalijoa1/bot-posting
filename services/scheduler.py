@@ -146,8 +146,9 @@ async def run_post_send_loop(bot: Bot) -> None:
                 # directly visible instead of inferred from absence of logs.
                 # Safe to remove once the real cause is confirmed.
                 logger.warning(
-                    "run_post_send_loop: now=%s matched %d post(s): %s",
+                    "run_post_send_loop: now=%s matched %d post(s): %s | compiled_sql=%s",
                     now, len(posts), [(p.id, p.scheduled_time) for p in posts],
+                    q.compile(compile_kwargs={"literal_binds": True}),
                 )
 
                 for post in posts:
