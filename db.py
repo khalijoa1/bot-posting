@@ -19,7 +19,6 @@ class Base(DeclarativeBase):
 engine = create_async_engine(get_settings().database_url, echo=False)
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-
 # Same normalization handlers/sources.py's _normalize_identifier() applies
 # to newly-typed identifiers - duplicated here (rather than imported) so
 # this one-time data cleanup below has no dependency on the handlers
@@ -251,7 +250,65 @@ async def init_db() -> None:
                 )
             logger.warning("Resumed %d stuck repeating post(s): %s", len(stuck_ids), stuck_ids)
 
+        # ONE-TIME KICKSTART (requested by operator): force every currently
+        # repeating post to send right now, on this boot, then carry on
+        # with its normal repeat cycle exactly as before. This is
+        # intentionally temporary - once it has run one time, remove this
+        # block in a follow-up commit so it doesn't pointlessly re-fire on
+        # every future restart.
+        now_str2 = datetime.utcnow().isoformat(sep=" ")
+
+        # Posts still waiting for their first/next send - just pull their
+        # scheduled_time to now so the normal send loop picks them up on
+        # its next pass instead of waiting.
+        res_a = await conn.exec_driver_sql(
+            "SELECT id FROM posts WHERE status = 'scheduled' AND repeat_interval_seconds IS NOT NULL"
+        )
+        ids_a = [r[0] for r in res_a.fetchall()]
+        for pid in ids_a:
+            await conn.exec_driver_sql(
+                "UPDATE posts SET scheduled_time = ? WHERE id = ?", (now_str2, pid)
+            )
+
+        # Posts already SENT with no auto-delete configured - clear their
+        # per-target sent state and put them back to SCHEDULED so they
+        # resend immediately, same recycle path used for the stuck-post
+        # repair above.
+        res_b = await conn.exec_driver_sql(
+            "SELECT id FROM posts WHERE status = 'sent' AND repeat_interval_seconds IS NOT NULL "
+            "AND auto_delete_seconds IS NULL"
+        )
+        ids_b = [r[0] for r in res_b.fetchall()]
+        for pid in ids_b:
+            await conn.exec_driver_sql(
+                "UPDATE post_targets SET message_id = NULL, extra_message_ids = NULL, "
+                "sent_at = NULL WHERE post_id = ?",
+                (pid,),
+            )
+            await conn.exec_driver_sql(
+                "UPDATE posts SET status = 'scheduled', scheduled_time = ?, delete_at = NULL "
+                "WHERE id = ?",
+                (now_str2, pid),
+            )
+
+        # Posts already SENT with auto-delete configured - the scheduler's
+        # delete_at-based recycle path handles these normally, so just pull
+        # their delete_at to now so that path fires immediately instead of
+        # waiting out the rest of the auto-delete window.
+        res_c = await conn.exec_driver_sql(
+            "SELECT id FROM posts WHERE status = 'sent' AND repeat_interval_seconds IS NOT NULL "
+            "AND auto_delete_seconds IS NOT NULL"
+        )
+        ids_c = [r[0] for r in res_c.fetchall()]
+        for pid in ids_c:
+            await conn.exec_driver_sql("UPDATE posts SET delete_at = ? WHERE id = ?", (now_str2, pid))
+
+        if ids_a or ids_b or ids_c:
+            logger.warning(
+                "Kickstarted repeating posts - immediate: %s, via delete+recycle: %s",
+                ids_a + ids_b, ids_c,
+            )
+
 
 def session() -> AsyncSession:
     return async_session_factory()
-
