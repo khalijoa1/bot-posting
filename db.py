@@ -303,10 +303,35 @@ async def init_db() -> None:
         for pid in ids_c:
             await conn.exec_driver_sql("UPDATE posts SET delete_at = ? WHERE id = ?", (now_str2, pid))
 
-        if ids_a or ids_b or ids_c:
+        # Posts that got stuck in DELETED status despite still having a
+        # repeat interval set - this happens for any repeating post that
+        # hit a failed send/delete cycle BEFORE the scheduler's "stopped
+        # repeating permanently after a failed send" fix landed. Once a
+        # post falls into DELETED, nothing ever looks at it again: both
+        # recycle paths above only ever query status IN ('scheduled',
+        # 'sent'). If repeat_interval_seconds is still set, the operator
+        # clearly wanted it to keep looping - so it's revived the same
+        # way as the SENT/no-auto-delete case, not left dead forever.
+        res_d = await conn.exec_driver_sql(
+            "SELECT id FROM posts WHERE status = 'deleted' AND repeat_interval_seconds IS NOT NULL"
+        )
+        ids_d = [r[0] for r in res_d.fetchall()]
+        for pid in ids_d:
+            await conn.exec_driver_sql(
+                "UPDATE post_targets SET message_id = NULL, extra_message_ids = NULL, "
+                "sent_at = NULL WHERE post_id = ?",
+                (pid,),
+            )
+            await conn.exec_driver_sql(
+                "UPDATE posts SET status = 'scheduled', scheduled_time = ?, delete_at = NULL "
+                "WHERE id = ?",
+                (now_str2, pid),
+            )
+
+        if ids_a or ids_b or ids_c or ids_d:
             logger.warning(
-                "Kickstarted repeating posts - immediate: %s, via delete+recycle: %s",
-                ids_a + ids_b, ids_c,
+                "Kickstarted repeating posts - immediate: %s, via delete+recycle: %s, revived from DELETED: %s",
+                ids_a + ids_b, ids_c, ids_d,
             )
 
 
