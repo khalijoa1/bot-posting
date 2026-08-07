@@ -34,10 +34,11 @@ class DeleteState(StatesGroup):
 
 
 @router.message(Command("myposts"))
-async def list_posts(message: types.Message):
+async def list_posts(message: types.Message, user_id: int | None = None):
     """List all user's posts."""
+    owner_id = user_id if user_id is not None else message.from_user.id
     async with session() as s:
-        q = select(Post).where(Post.owner_user_id == message.from_user.id)
+        q = select(Post).where(Post.owner_user_id == owner_id)
         res = await s.execute(q)
         posts = res.scalars().all()
 
