@@ -106,6 +106,7 @@ async def run_scheduler_loop(bot: Bot) -> None:
         except asyncio.CancelledError:
             raise
         except Exception:
+            logger.exception("run_scheduler_loop iteration failed")
             await asyncio.sleep(5)
 
 
@@ -118,20 +119,6 @@ def _build_media_group(items: list[PostMediaItem], caption: str | None) -> list:
         else:
             media.append(types.InputMediaPhoto(media=it.file_id, caption=cap))
     return media
-
-
-def _build_button(button_text: str | None, button_url: str | None) -> types.InlineKeyboardMarkup | None:
-    """Same construction as handlers/compose.py:_build_button - kept as a
-    separate copy here (rather than imported) so this background loop has
-    no dependency on the handlers package, matching the rest of this
-    module's self-contained style. Both fields must be set for a button to
-    show - see models.Post.button_text/button_url.
-    """
-    if not button_text or not button_url:
-        return None
-    return types.InlineKeyboardMarkup(
-        inline_keyboard=[[types.InlineKeyboardButton(text=button_text, url=button_url)]]
-    )
 
 
 async def run_post_send_loop(bot: Bot) -> None:
@@ -165,22 +152,23 @@ async def run_post_send_loop(bot: Bot) -> None:
                         mi_res = await s.execute(mi_q)
                         media_items = mi_res.scalars().all()
 
-                    # Built once per post, reused for every target below.
-                    # None for ALBUM posts regardless of what's stored on
-                    # the row - Telegram's send_media_group has no
-                    # reply_markup parameter at all (same hard platform
-                    # limitation already documented in services/reposter.py
-                    # for reposts and in handlers/compose.py's ask_button,
-                    # which never lets an album post collect a button in
-                    # the first place).
-                    reply_markup = (
-                        None if post.content_type == ContentType.ALBUM
-                        else _build_button(post.button_text, post.button_url)
-                    )
-
-                    any_sent = False
+                    sent_count = 0
                     for target in targets:
                         if target.message_id is not None:
+                            continue
+                        if target.channel is None:
+                            # Stale PostTarget: the channel row it pointed at
+                            # was removed, so there's nowhere to send this to.
+                            # Previously this fell through to the bare
+                            # `except Exception: continue` below via an
+                            # AttributeError on target.channel.chat_id,
+                            # silently no-op'ing forever with zero log trace.
+                            # Log it explicitly so a dangling target is
+                            # visible instead of invisible.
+                            logger.warning(
+                                "post_id=%s target channel_id=%s no longer exists - skipping send",
+                                post.id, target.channel_id,
+                            )
                             continue
                         try:
                             if post.content_type == ContentType.ALBUM and media_items:
@@ -198,7 +186,6 @@ async def run_post_send_loop(bot: Bot) -> None:
                                     chat_id=target.channel.chat_id,
                                     photo=post.photo_file_id,
                                     caption=post.text or None,
-                                    reply_markup=reply_markup,
                                 )
                                 target.message_id = msg.message_id
                             elif post.content_type == ContentType.VIDEO and post.video_file_id:
@@ -206,37 +193,36 @@ async def run_post_send_loop(bot: Bot) -> None:
                                     chat_id=target.channel.chat_id,
                                     video=post.video_file_id,
                                     caption=post.text or None,
-                                    reply_markup=reply_markup,
                                 )
                                 target.message_id = msg.message_id
                             else:
-                                msg = await bot.send_message(
-                                    chat_id=target.channel.chat_id,
-                                    text=post.text or "",
-                                    reply_markup=reply_markup,
-                                )
+                                msg = await bot.send_message(chat_id=target.channel.chat_id, text=post.text or "")
                                 target.message_id = msg.message_id
                             target.sent_at = now
-                            any_sent = True
+                            sent_count += 1
                         except Exception:
+                            # Previously a bare `continue` here swallowed
+                            # every send failure with zero trace - Telegram
+                            # errors (bot kicked from channel, chat not
+                            # found, message too long, etc.) looked
+                            # identical to success in the logs. Now logged
+                            # so real failures are diagnosable.
                             logger.exception(
                                 "Failed to send post_id=%s to chat_id=%s",
-                                post.id, target.channel.chat_id,
+                                post.id,
+                                target.channel.chat_id if target.channel else target.channel_id,
                             )
                             continue
 
-                    if not any_sent and post.repeat_interval_seconds:
-                        # Nothing actually sent this cycle for a repeating
-                        # post - leave it SCHEDULED so this loop's next pass
-                        # (30s later) retries automatically. Marking it SENT
-                        # here with no sent_at anywhere would permanently
-                        # kill the repeat cycle for posts with no
-                        # auto-delete: run_scheduler_loop only recycles those
-                        # based on target.sent_at, and if that stays empty
-                        # forever, the post never becomes due again - which
-                        # is exactly the "repeat stops after one send hiccup"
-                        # bug this guards against.
-                        continue
+                    if sent_count:
+                        logger.warning(
+                            "post_id=%s sent to %d/%d target(s)", post.id, sent_count, len(targets)
+                        )
+                    elif targets:
+                        logger.warning(
+                            "post_id=%s scheduled_time reached but sent to 0/%d target(s)",
+                            post.id, len(targets),
+                        )
 
                     post.status = PostStatus.SENT
                     if post.auto_delete_seconds:
@@ -246,4 +232,5 @@ async def run_post_send_loop(bot: Bot) -> None:
         except asyncio.CancelledError:
             raise
         except Exception:
+            logger.exception("run_post_send_loop iteration failed")
             await asyncio.sleep(5)
