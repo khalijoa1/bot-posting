@@ -148,7 +148,7 @@ async def run_post_send_loop(bot: Bot) -> None:
                 logger.warning(
                     "run_post_send_loop: now=%s matched %d post(s): %s | compiled_sql=%s",
                     now, len(posts), [(p.id, p.scheduled_time) for p in posts],
-                    q.compile(compile_kwargs={"literal_binds": True}),
+                    str(q.compile(compile_kwargs={"literal_binds": True})).replace("\n", " "),
                 )
 
                 for post in posts:
