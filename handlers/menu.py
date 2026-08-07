@@ -280,14 +280,14 @@ async def act_post_category(query: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "act:myposts")
 async def act_myposts(query: types.CallbackQuery):
     from handlers.posts import list_posts
-    await query.answer()
-   await list_posts(query.message, user_id=query.from_user.id)
+    await query.answer() 
     await query.message.answer("⬅️ Back to menu:", reply_markup=BACK_ONLY_KB)
 
 
 @router.callback_query(F.data == "act:edit")
 async def act_edit(query: types.CallbackQuery, state: FSMContext):
     from handlers.posts import edit_start
+    await list_posts(query.message, user_id=query.from_user.id)
     await query.answer()
     await edit_start(query.message, state)
 
