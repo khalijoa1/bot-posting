@@ -3,6 +3,7 @@ import re
 from collections.abc import AsyncIterator
 from datetime import datetime
 
+from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
@@ -16,8 +17,35 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_async_engine(get_settings().database_url, echo=False)
+# timeout=30 sets sqlite3's busy_timeout (seconds) on every new connection -
+# instead of raising "database is locked" the instant a write collides with
+# another connection, SQLite retries internally for up to 30s first. This
+# app has several concurrent writers sharing one file (the compose handler
+# plus multiple background loops in services/*.py), which was producing
+# "database is locked" errors under normal load - e.g. someone using
+# Compose & Post at the same moment run_post_send_loop's own commit was
+# in flight.
+engine = create_async_engine(
+    get_settings().database_url, echo=False, connect_args={"timeout": 30}
+)
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _set_sqlite_pragmas(dbapi_connection, connection_record):
+    """WAL (write-ahead log) mode lets readers and writers proceed
+    concurrently instead of the default rollback-journal mode's exclusive
+    whole-file lock on every write - the other half of the fix above
+    (busy_timeout alone just makes lock collisions wait instead of
+    failing; WAL makes most of them stop happening at all). synchronous=
+    NORMAL is the standard pairing with WAL: still durable against
+    application/OS crashes, just not fsync-per-transaction like the
+    default FULL setting, which would otherwise erase most of the
+    concurrency benefit WAL is here for."""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.close()
 
 # Same normalization handlers/sources.py's _normalize_identifier() applies
 # to newly-typed identifiers - duplicated here (rather than imported) so
