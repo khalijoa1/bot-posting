@@ -1,33 +1,3 @@
-        # ONE-TIME DIAGNOSTIC #2 (requested by operator): the operator
-        # says buttonless recurring posts still exist even though the DIAG
-        # above (posts.repeat_interval_seconds) came back empty. There is
-        # a SEPARATE recurring feature - models.RecurringMessage
-        # (recurring_messages table, sent by services/recurring.py) for
-        # per-moderated-group repeating announcements, with its own
-        # buttons_json field, entirely independent of the Post table this
-        # migration has been cleaning up so far. Listing every row here so
-        # it's clear whether THIS is what the operator means. Safe to
-        # remove once seen.
-        res_diag2 = await conn.exec_driver_sql(
-            "SELECT id, group_id, enabled, interval_seconds, buttons_json "
-            "FROM recurring_messages ORDER BY id"
-        )
-        diag2_rows = res_diag2.fetchall()
-        logger.warning(
-            "DIAG2: %d recurring_message(s) exist: %s",
-            len(diag2_rows),
-            [
-                {
-                    "id": r[0],
-                    "group_id": r[1],
-                    "enabled": r[2],
-                    "interval_seconds": r[3],
-                    "buttons_json": r[4],
-                }
-                for r in diag2_rows
-            ],
-        )
-
 import logging
 import re
 from collections.abc import AsyncIterator
@@ -508,6 +478,36 @@ async def init_db() -> None:
             ],
         )
 
+
+        # ONE-TIME DIAGNOSTIC #2 (requested by operator): the operator
+        # says buttonless recurring posts still exist even though the DIAG
+        # above (posts.repeat_interval_seconds) came back empty. There is
+        # a SEPARATE recurring feature - models.RecurringMessage
+        # (recurring_messages table, sent by services/recurring.py) for
+        # per-moderated-group repeating announcements, with its own
+        # buttons_json field, entirely independent of the Post table this
+        # migration has been cleaning up so far. Listing every row here so
+        # it's clear whether THIS is what the operator means. Safe to
+        # remove once seen.
+        res_diag2 = await conn.exec_driver_sql(
+            "SELECT id, group_id, enabled, interval_seconds, buttons_json "
+            "FROM recurring_messages ORDER BY id"
+        )
+        diag2_rows = res_diag2.fetchall()
+        logger.warning(
+            "DIAG2: %d recurring_message(s) exist: %s",
+            len(diag2_rows),
+            [
+                {
+                    "id": r[0],
+                    "group_id": r[1],
+                    "enabled": r[2],
+                    "interval_seconds": r[3],
+                    "buttons_json": r[4],
+                }
+                for r in diag2_rows
+            ],
+        )
 
 def session() -> AsyncSession:
     return async_session_factory()
