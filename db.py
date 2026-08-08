@@ -528,5 +528,39 @@ async def init_db() -> None:
             ],
         )
 
+        # ONE-TIME DIAGNOSTIC #4 (requested by operator): the operator
+        # previously had posts 474, 483, 489, 922, 925, 991, 1230 set to a
+        # 2h repeat with a button (see earlier kickstart). DIAG3 above now
+        # shows zero posts with a button at all, so check specifically
+        # whether these rows still exist and what their button/repeat
+        # fields currently hold - were they deleted outright, or did their
+        # button_text/button_url/repeat_interval_seconds get cleared?
+        # Safe to remove once seen.
+        res_diag4 = await conn.exec_driver_sql(
+            "SELECT id, status, button_text, button_url, repeat_interval_seconds "
+            "FROM posts WHERE id IN (474, 483, 489, 922, 925, 991, 1230) ORDER BY id"
+        )
+        diag4_rows = res_diag4.fetchall()
+        diag4_found_ids = [r[0] for r in diag4_rows]
+        diag4_missing_ids = [
+            pid for pid in (474, 483, 489, 922, 925, 991, 1230)
+            if pid not in diag4_found_ids
+        ]
+        logger.warning(
+            "DIAG4: of posts 474/483/489/922/925/991/1230, %d still exist: %s | missing (no longer in table): %s",
+            len(diag4_rows),
+            [
+                {
+                    "id": r[0],
+                    "status": r[1],
+                    "button_text": r[2],
+                    "button_url": r[3],
+                    "repeat_interval_seconds": r[4],
+                }
+                for r in diag4_rows
+            ],
+            diag4_missing_ids,
+        )
+
 def session() -> AsyncSession:
     return async_session_factory()
