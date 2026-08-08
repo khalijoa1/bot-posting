@@ -478,5 +478,29 @@ async def init_db() -> None:
             ],
         )
 
+        # ONE-TIME CLEANUP #2 (requested by operator, follow-up to DIAG2
+        # above): stop the buttonless recurring_messages row(s) found - the
+        # same "stop it if it has no button, leave it alone if it does"
+        # policy already applied to composed Posts above, now applied to
+        # this separate per-group recurring-announcement feature too.
+        # Unlike Post, a RecurringMessage has no message_id to clean up -
+        # services/recurring.py sends a brand-new message every interval,
+        # it never edits/tracks a previous one - so disabling (enabled=0)
+        # is the whole fix; nothing live needs deleting.
+        res_rm_nobtn = await conn.exec_driver_sql(
+            "SELECT id FROM recurring_messages WHERE enabled = 1 "
+            "AND (buttons_json IS NULL OR buttons_json = '' OR buttons_json = '[]')"
+        )
+        rm_stopped_ids = [r[0] for r in res_rm_nobtn.fetchall()]
+        for rmid in rm_stopped_ids:
+            await conn.exec_driver_sql(
+                "UPDATE recurring_messages SET enabled = 0 WHERE id = ?", (rmid,)
+            )
+        if rm_stopped_ids:
+            logger.warning(
+                "Stopped %d buttonless recurring_message(s): %s",
+                len(rm_stopped_ids), rm_stopped_ids,
+            )
+
 def session() -> AsyncSession:
     return async_session_factory()
