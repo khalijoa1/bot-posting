@@ -121,6 +121,30 @@ def _build_media_group(items: list[PostMediaItem], caption: str | None) -> list:
     return media
 
 
+def _build_button(button_text: str | None, button_url: str | None) -> types.InlineKeyboardMarkup | None:
+    """Build the single-button InlineKeyboardMarkup for a post, or None if
+    no button was configured. Mirrors handlers/compose.py:_build_button -
+    kept as a separate copy here (rather than importing) to avoid coupling
+    this background loop to the compose handler module. Both fields must
+    be set - see models.Post.button_text/button_url.
+
+    Every send in this loop is a resend: the very first send happens via
+    handlers/compose.py's post_now/_send_to_channel, which already builds
+    and attaches this markup - but every SCHEDULED send and every
+    recurring-post recycle (see run_scheduler_loop above) goes through
+    THIS loop instead, and until now this loop never attached the button
+    at all. That's why a post created with a button would show it once
+    (on an immediate "Post Now") but lose it on every scheduled/repeat
+    send - the button config was saved on the Post row correctly, this
+    loop just wasn't reading it.
+    """
+    if not button_text or not button_url:
+        return None
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[[types.InlineKeyboardButton(text=button_text, url=button_url)]]
+    )
+
+
 async def run_post_send_loop(bot: Bot) -> None:
     """Background scheduler that sends Posts once their scheduled_time arrives.
 
@@ -166,6 +190,17 @@ async def run_post_send_loop(bot: Bot) -> None:
                         mi_res = await s.execute(mi_q)
                         media_items = mi_res.scalars().all()
 
+                    # Built once per post rather than per-target - same
+                    # button on every channel it's sent to. None for ALBUM
+                    # posts is correct and expected: Telegram's
+                    # send_media_group has no reply_markup parameter at all
+                    # (see _build_media_group's caller below), and
+                    # handlers/compose.py's ask_button step already skips
+                    # collecting a button for albums for this same reason,
+                    # so button_text/button_url are already None on any
+                    # ALBUM post row.
+                    reply_markup = _build_button(post.button_text, post.button_url)
+
                     sent_count = 0
                     for target in targets:
                         if target.message_id is not None:
@@ -200,6 +235,7 @@ async def run_post_send_loop(bot: Bot) -> None:
                                     chat_id=target.channel.chat_id,
                                     photo=post.photo_file_id,
                                     caption=post.text or None,
+                                    reply_markup=reply_markup,
                                 )
                                 target.message_id = msg.message_id
                             elif post.content_type == ContentType.VIDEO and post.video_file_id:
@@ -207,10 +243,15 @@ async def run_post_send_loop(bot: Bot) -> None:
                                     chat_id=target.channel.chat_id,
                                     video=post.video_file_id,
                                     caption=post.text or None,
+                                    reply_markup=reply_markup,
                                 )
                                 target.message_id = msg.message_id
                             else:
-                                msg = await bot.send_message(chat_id=target.channel.chat_id, text=post.text or "")
+                                msg = await bot.send_message(
+                                    chat_id=target.channel.chat_id,
+                                    text=post.text or "",
+                                    reply_markup=reply_markup,
+                                )
                                 target.message_id = msg.message_id
                             target.sent_at = now
                             sent_count += 1
