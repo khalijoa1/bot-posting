@@ -31,6 +31,7 @@ BroadcastUser (see handlers/broadcast.py) - that's how 📢 Broadcast under
 Settings knows who it's allowed to message later.
 """
 import json
+import logging
 
 from aiogram import Router, types, F
 from aiogram.enums import ChatMemberStatus
@@ -40,6 +41,7 @@ from db import session
 from models import Channel
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 def _parse_required(raw: str | None) -> list[dict]:
@@ -69,6 +71,12 @@ async def _missing_required(bot, user_id: int, required: list[dict]) -> list[dic
             if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
                 missing.append(r)
         except Exception:
+            logger.warning(
+                "force-join: couldn't verify membership of %r for user_id=%s - "
+                "treating as missing (bot likely isn't admin/member of that chat, "
+                "or the identifier is wrong)",
+                identifier, user_id, exc_info=True,
+            )
             missing.append(r)
     return missing
 
@@ -170,6 +178,12 @@ async def cb_recheck_force_join(query: types.CallbackQuery) -> None:
     try:
         await query.bot.approve_chat_join_request(chat_id=channel.chat_id, user_id=query.from_user.id)
     except Exception:
+        logger.warning(
+            "force-join: approve_chat_join_request failed for chat_id=%s user_id=%s "
+            "(request may have expired/already handled, or the bot may lack 'Add users' "
+            "admin rights in this channel)",
+            channel.chat_id, query.from_user.id, exc_info=True,
+        )
         await query.answer(
             "Couldn't approve automatically - your request may have expired, already been handled, "
             "or you may not have a pending request for this channel.",
