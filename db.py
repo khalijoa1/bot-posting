@@ -417,5 +417,36 @@ async def init_db() -> None:
         )
 
 
+        # ONE-TIME DIAGNOSTIC (requested by operator, follow-up to the
+        # buttonless-cleanup block above): the previous deploy of that
+        # cleanup logged nothing at all - no "Stopped N buttonless
+        # repeating post(s)" and no "Kickstarted repeating posts" - which
+        # is ambiguous from the logs alone (it could mean zero buttonless
+        # recurring posts exist, OR that something about the query/timing
+        # missed real rows). This unconditionally lists every post that is
+        # STILL configured to repeat right now, with its button_text/
+        # button_url/status, so the real current state is directly visible
+        # in the boot log instead of inferred from silence. Safe to remove
+        # once the operator has seen this output.
+        res_diag = await conn.exec_driver_sql(
+            "SELECT id, status, button_text, button_url, repeat_interval_seconds "
+            "FROM posts WHERE repeat_interval_seconds IS NOT NULL ORDER BY id"
+        )
+        diag_rows = res_diag.fetchall()
+        logger.warning(
+            "DIAG: %d post(s) currently have repeat_interval_seconds set: %s",
+            len(diag_rows),
+            [
+                {
+                    "id": r[0],
+                    "status": r[1],
+                    "button_text": r[2],
+                    "button_url": r[3],
+                    "repeat_interval_seconds": r[4],
+                }
+                for r in diag_rows
+            ],
+        )
+
 def session() -> AsyncSession:
     return async_session_factory()
