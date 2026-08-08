@@ -376,52 +376,44 @@ async def init_db() -> None:
                 ids_a + ids_b, ids_c, ids_d,
             )
 
-        # ONE-TIME TARGETED REPEAT SETUP (requested by operator): posts
-        # 474, 483, 489, 922, 925, 991, 1230 should repeat every 2 hours
-        # (7200s) going forward, starting immediately on this boot.
-        # Forces each into a clean SCHEDULED state regardless of its
-        # current status so the normal send loop (run_post_send_loop)
-        # picks it up on its very next 30s pass, then the repeat cycle
-        # carries on from there exactly like any other repeating post.
-        # Intentionally temporary - remove in a follow-up commit once
-        # confirmed running, same as the general kickstart block above.
-        _targeted_ids = [474, 483, 489, 922, 925, 991, 1230]
-        _now_str3 = datetime.utcnow().isoformat(sep=" ")
-        for pid in _targeted_ids:
-            await conn.exec_driver_sql(
-                "UPDATE posts SET repeat_interval_seconds = 7200 WHERE id = ?", (pid,)
-            )
-            await conn.exec_driver_sql(
-                "UPDATE post_targets SET message_id = NULL, extra_message_ids = NULL, "
-                "sent_at = NULL WHERE post_id = ?",
-                (pid,),
-            )
-            await conn.exec_driver_sql(
-                "UPDATE posts SET status = 'SCHEDULED', scheduled_time = ?, delete_at = NULL "
-                "WHERE id = ?",
-                (_now_str3, pid),
-            )
-        logger.warning("Set 2h repeat + kickstarted targeted posts: %s", _targeted_ids)
-
-        # TEMPORARY DIAGNOSTIC: confirms the case-sensitivity fix above
-        # actually landed - shows each targeted post's real status value
-        # plus an overall status breakdown for the whole table, so it's
-        # obvious whether rows now read 'SCHEDULED' (matching what
-        # run_post_send_loop's ORM query looks for) instead of the old
-        # lowercase 'scheduled' that never matched anything. Safe to
-        # remove once confirmed.
-        diag_rows = await conn.exec_driver_sql(
-            "SELECT id, status, repeat_interval_seconds, owner_user_id, scheduled_time "
-            "FROM posts WHERE id IN (474,483,489,922,925,991,1230)"
+        # ONE-TIME CLEANUP (requested by operator): stop every currently-
+        # repeating post that has NO inline button configured (button_text
+        # and button_url both set - see handlers/compose.py). Every
+        # repeating post that DOES have a button is left alone so the
+        # kickstart logic above (res_a/b/c/d) - now gated to buttoned posts
+        # only, see the added button_text/button_url clause on each of its
+        # queries - picks it up and resends it promptly, now that
+        # services/scheduler.py actually attaches the button on every send.
+        res_nobtn = await conn.exec_driver_sql(
+            "SELECT id, status FROM posts WHERE repeat_interval_seconds IS NOT NULL "
+            "AND (button_text IS NULL OR button_url IS NULL)"
         )
-        diag_found = diag_rows.fetchall()
-        diag_breakdown = await conn.exec_driver_sql(
-            "SELECT status, COUNT(*) FROM posts GROUP BY status"
-        )
-        diag_breakdown_rows = diag_breakdown.fetchall()
-        logger.warning(
-            "DIAGNOSTIC targeted posts after case fix: %s | status breakdown across all posts: %s",
-            diag_found, diag_breakdown_rows,
+        buttonless = res_nobtn.fetchall()
+        now_str4 = datetime.utcnow().isoformat(sep=" ")
+        stopped_ids = []
+        for pid, status in buttonless:
+            await conn.exec_driver_sql(
+                "UPDATE posts SET repeat_interval_seconds = NULL WHERE id = ?", (pid,)
+            )
+            if status == "SENT":
+                # Leave message_id/sent_at alone and just pull delete_at to
+                # now - run_scheduler_loop's normal SENT+delete_at<=now path
+                # then deletes the live channel message(s) using that intact
+                # message_id, and finalizes the post as DELETED instead of
+                # recycling it, since repeat_interval_seconds is now NULL.
+                await conn.exec_driver_sql(
+                    "UPDATE posts SET delete_at = ? WHERE id = ?", (now_str4, pid)
+                )
+            else:
+                # Nothing live to delete yet (still SCHEDULED/DRAFT) - just
+                # stop it outright.
+                await conn.exec_driver_sql(
+                    "UPDATE posts SET status = 'CANCELED' WHERE id = ?", (pid,)
+                )
+            stopped_ids.append(pid)
+        if stopped_ids:
+            logger.warning(
+                "Stopped %d buttonless repeating post(s): %s", len(stopped_ids), stopped_ids
         )
 
 
