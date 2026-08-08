@@ -502,5 +502,31 @@ async def init_db() -> None:
                 len(rm_stopped_ids), rm_stopped_ids,
             )
 
+        # ONE-TIME DIAGNOSTIC #3 (requested by operator): list every post
+        # that has both button_text and button_url set, regardless of
+        # current repeat_interval_seconds/status - these are the
+        # candidates for the "start the loop for buttoned posts" request.
+        # Safe to remove once seen.
+        res_diag3 = await conn.exec_driver_sql(
+            "SELECT id, status, button_text, button_url, repeat_interval_seconds "
+            "FROM posts WHERE button_text IS NOT NULL AND button_url IS NOT NULL "
+            "ORDER BY id"
+        )
+        diag3_rows = res_diag3.fetchall()
+        logger.warning(
+            "DIAG3: %d post(s) have both button_text and button_url set: %s",
+            len(diag3_rows),
+            [
+                {
+                    "id": r[0],
+                    "status": r[1],
+                    "button_text": r[2],
+                    "button_url": r[3],
+                    "repeat_interval_seconds": r[4],
+                }
+                for r in diag3_rows
+            ],
+        )
+
 def session() -> AsyncSession:
     return async_session_factory()
