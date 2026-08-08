@@ -41,7 +41,23 @@ def _render_template(template: str, context: dict[str, Any]) -> str:
 
 # Matches http(s)/www links and bare t.me links (Telegram's own share-link
 # domain, which very often shows up without a scheme in forwarded captions).
-_LINK_RE = re.compile(r"(?:https?://|www\.)\S+|(?<!\w)t\.me/\S+", re.IGNORECASE)
+# Also matches bare "word.tld" links with no http/www/t.me prefix at all
+# (e.g. "mysite.com" or "shop.example.io/deal") - Telegram still auto-detects
+# and auto-links these (MessageEntityUrl) even with no scheme, but this regex
+# previously only matched http(s)://, www., or t.me/ prefixed links, so a
+# bare domain fell through untouched instead of being replaced.
+_BARE_DOMAIN_TLDS = (
+    "com|net|org|io|co|me|info|biz|xyz|club|online|site|shop|app|dev|link|"
+    "vip|top|pro|live|tv|cc|ai|so|to|ly|gl|work|rest|finance|money|casino|"
+    "bet|win|store|tech|website|space|fun|icu|monster|us|uk|de|fr|es|it|"
+    "nl|ru|in|ca|au|ng|ke|za|gg|id|ph|vn|th|kz|by|ua|pl|se|no|dk|fi"
+)
+_LINK_RE = re.compile(
+    r"(?:https?://|www\.)\S+"
+    r"|(?<!\w)t\.me/\S+"
+    rf"|\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{{0,61}}[a-zA-Z0-9])?\.)+(?:{_BARE_DOMAIN_TLDS})\b(?:/\S*)?",
+    re.IGNORECASE,
+)
 # Matches @username mentions (Telegram usernames are 5-32 chars; using a
 # slightly looser 3-32 to be safe rather than under-match).
 _MENTION_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,32}\b")
