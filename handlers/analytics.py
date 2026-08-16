@@ -15,7 +15,7 @@ from aiogram import Router
 from sqlalchemy import func, select
 
 from db import session
-from models import Channel, ChannelStatSnapshot, Post, PostStatus, PostTarget, SourceChannel
+from models import BroadcastUser, Channel, ChannelStatSnapshot, Post, PostStatus, PostTarget, SourceChannel
 
 router = Router()
 
@@ -94,6 +94,12 @@ async def show_analytics(message: types.Message):
         src_q = select(func.count(SourceChannel.id))
         total_sources = (await s.execute(src_q)).scalar() or 0
 
+        # Broadcast audience: everyone who's ever submitted a join
+        # request to one of the operator's auto-approve channels (see
+        # handlers/broadcast.py) - this is who /broadcast actually reaches.
+        audience_q = select(func.count(BroadcastUser.user_id))
+        broadcast_audience = (await s.execute(audience_q)).scalar() or 0
+
     growth_lines = await _channel_growth_lines(message.bot, channels) if channels else []
 
     text = (
@@ -106,6 +112,7 @@ async def show_analytics(message: types.Message):
         f"📤 Messages Delivered: {total_messages}\n"
         f"📍 Channels Added: {total_channels}\n"
         f"📡 Sources Watched: {total_sources}\n"
+        f"👥 Broadcast Audience: {broadcast_audience}\n"
     )
 
     if growth_lines:
@@ -118,4 +125,7 @@ async def show_analytics(message: types.Message):
 
     text += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    await message.answer(text)
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="📢 Broadcast to Audience", callback_data="act:broadcast")]
+    ])
+    await message.answer(text, reply_markup=kb)
