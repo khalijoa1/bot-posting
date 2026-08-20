@@ -54,6 +54,19 @@ def _parse_required(raw: str | None) -> list[dict]:
         return []
 
 
+def _normalize_chat_id(identifier: str):
+    identifier = identifier.strip()
+    if "/addlist/" in identifier or "/joinchat/" in identifier:
+        return None
+    if identifier.startswith("http://") or identifier.startswith("https://"):
+        if "t.me/" in identifier:
+            identifier = identifier.split("t.me/", 1)[1]
+        identifier = identifier.split("?")[0].strip("/")
+    if identifier.startswith("@"):
+        return identifier
+    if identifier.lstrip("-").isdigit():
+        return int(identifier)
+    return f"@{identifier}" if identifier else None
 async def _missing_required(bot, user_id: int, required: list[dict]) -> list[dict]:
     """Return the subset of `required` entries the user is NOT currently a
     member of. If a membership check itself fails (e.g. the bot isn't an
@@ -66,8 +79,12 @@ async def _missing_required(bot, user_id: int, required: list[dict]) -> list[dic
         identifier = r.get("identifier")
         if not identifier:
             continue
+        chat_id = _normalize_chat_id(identifier)
+        if chat_id is None:
+            missing.append(r)
+            continue
         try:
-            member = await bot.get_chat_member(chat_id=identifier, user_id=user_id)
+            member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
             if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
                 missing.append(r)
         except Exception:
