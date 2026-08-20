@@ -106,7 +106,7 @@ async def approve_pending_join_requests(chat_id: int) -> tuple[int, int, str | N
     requests were found).
     """
     if _client is None:
-        return 0, (
+        return 0, 0, (
             "Telethon userbot isn't connected (TELETHON_API_ID/HASH not "
             "configured, or it failed to start) - approving old join "
             "requests requires it; the Bot API can't list them on its own."
@@ -122,7 +122,7 @@ async def approve_pending_join_requests(chat_id: int) -> tuple[int, int, str | N
     try:
         peer = await _client.get_input_entity(chat_id)
     except Exception as e:
-        return 0, (
+        return 0, 0, (
             f"Couldn't find chat {chat_id} on the userbot account - it needs "
             f"to already be a member/admin of this chat for this to work "
             f"({e})."
