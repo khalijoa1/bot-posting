@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 import asyncio
 import html as html_lib
 import json
@@ -7,6 +8,7 @@ import logging
 import re
 from datetime import datetime, timedelta
 from typing import Any
+
 
 from aiogram import Bot
 from aiogram.enums import ParseMode
@@ -22,10 +24,14 @@ from aiogram.types import (
 from sqlalchemy import select
 from sqlalchemy import or_ as _sa_or  # noqa: F401 - kept for compatibility, unused after the identifier-matching fix below
 
+
 from db import session
 from models import Channel, ContentType, Post, PostMediaItem, PostStatus, PostTarget, RepostRule, SourceChannel
 
+
 logger = logging.getLogger(__name__)
+
+
 
 
 def _render_template(template: str, context: dict[str, Any]) -> str:
@@ -33,10 +39,13 @@ def _render_template(template: str, context: dict[str, Any]) -> str:
         def __missing__(self, key):
             return ""
 
+
     try:
         return template.format_map(SafeDict(context))
     except Exception:
         return template
+
+
 
 
 # Matches http(s)/www links and bare t.me links (Telegram's own share-link
@@ -66,6 +75,8 @@ _MENTION_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,32}\b")
 _BARE_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
 
 
+
+
 def _scrub_links(text: str, fallback: str | None) -> str:
     """Replace/remove any plain https://..., www., bare t.me/ link or
     @mention with the rule's default/fallback link (or strip it if no
@@ -77,11 +88,14 @@ def _scrub_links(text: str, fallback: str | None) -> str:
     def _sub(_match: re.Match) -> str:
         return fallback if fallback else ""
 
+
     text = _LINK_RE.sub(_sub, text)
     text = _MENTION_RE.sub(_sub, text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text
+
+
 
 
 def _rule_replacement_config(rule: RepostRule, dest: Channel) -> tuple[dict[str, str], str | None]:
@@ -106,6 +120,8 @@ def _rule_replacement_config(rule: RepostRule, dest: Channel) -> tuple[dict[str,
             mapping = repls.get("default") or repls.get(str(dest.chat_id)) or repls.get(str(dest.id)) or {}
             fallback = repls.get("fallback")
     return mapping, fallback
+
+
 
 
 def _render_repost_content(text: str | None, entities, rule: RepostRule, dest: Channel) -> str | None:
@@ -154,6 +170,7 @@ def _render_repost_content(text: str | None, entities, rule: RepostRule, dest: C
     if not text:
         return text
 
+
     mapping, fallback = _rule_replacement_config(rule, dest)
     # Longest "old" text first: if one replacement's "old" is a substring
     # of another's (e.g. a plain word "channel" configured alongside a
@@ -164,6 +181,7 @@ def _render_repost_content(text: str | None, entities, rule: RepostRule, dest: C
     # pattern always wins, regardless of which order the operator typed
     # the "old -> new" lines in.
     ordered_mapping = sorted(mapping.items(), key=lambda kv: len(kv[0]), reverse=True)
+
 
     def _mask_replacements(segment: str) -> tuple[str, dict[str, str]]:
         """First pass: swap each configured "old" text for a unique inert
@@ -192,17 +210,21 @@ def _render_repost_content(text: str | None, entities, rule: RepostRule, dest: C
             segment = re.sub(re.escape(old), token, segment, flags=re.IGNORECASE)
         return segment, placeholders
 
+
     def _unmask_replacements(segment: str, placeholders: dict[str, str]) -> str:
         for token, new in placeholders.items():
             segment = segment.replace(token, new)
         return segment
+
 
     masked = sorted(
         (e for e in (entities or []) if type(e).__name__ == "MessageEntityTextUrl"),
         key=lambda e: e.offset,
     )
 
+
     buf = text.encode("utf-16-le")
+
 
     def _render_plain(raw: bytes) -> str:
         segment = raw.decode("utf-16-le", errors="ignore")
@@ -210,6 +232,7 @@ def _render_repost_content(text: str | None, entities, rule: RepostRule, dest: C
         segment = _scrub_links(segment, fallback)
         segment = _unmask_replacements(segment, placeholders)
         return html_lib.escape(segment, quote=True)
+
 
     parts: list[str] = []
     cursor = 0
@@ -221,7 +244,9 @@ def _render_repost_content(text: str | None, entities, rule: RepostRule, dest: C
             # skip it rather than risk corrupting the buffer.
             continue
 
+
         parts.append(_render_plain(buf[cursor:start]))
+
 
         anchor_text = buf[start:end].decode("utf-16-le", errors="ignore")
         # The rule's "old -> new" word/phrase replacements apply to the
@@ -244,11 +269,16 @@ def _render_repost_content(text: str | None, entities, rule: RepostRule, dest: C
         # doesn't survive into the repost (matches how an unmatched plain
         # link is already stripped rather than left dangling).
 
+
         cursor = end
+
 
     parts.append(_render_plain(buf[cursor:]))
 
+
     return "".join(parts).strip()
+
+
 
 
 # Telegram Bot API limits, in characters counted AFTER entity parsing (i.e.
@@ -264,6 +294,8 @@ _CAPTION_LIMIT = 1024
 _TEXT_LIMIT = 4096
 
 
+
+
 def _truncate_html(html_str: str, limit: int) -> str:
     """Trim an HTML string (as produced by _render_repost_content) down to
     at most `limit` VISIBLE characters, leaving HTML tags/entities
@@ -276,6 +308,7 @@ def _truncate_html(html_str: str, limit: int) -> str:
         # markup length, so if the raw string already fits there's
         # nothing to trim.
         return html_str
+
 
     budget = max(0, limit - 1)  # leave room for a trailing ellipsis
     out: list[str] = []
@@ -319,11 +352,14 @@ def _truncate_html(html_str: str, limit: int) -> str:
         visible += 1
         i += 1
 
+
     if cut_short or i < n:
         out.append("…")
     for name in reversed(open_tags):
         out.append(f"</{name}>")
     return "".join(out)
+
+
 
 
 def _coerce_button_url(value: str) -> str | None:
@@ -354,6 +390,8 @@ def _coerce_button_url(value: str) -> str | None:
     return None
 
 
+
+
 def _translate_button_url(url: str, mapping: dict[str, str], fallback: str | None) -> str | None:
     """Resolve what a single source link/button URL should become: the
     rule's specific replacement for that exact URL if one is configured,
@@ -366,6 +404,8 @@ def _translate_button_url(url: str, mapping: dict[str, str], fallback: str | Non
     if not candidate:
         return None
     return _coerce_button_url(candidate)
+
+
 
 
 def _build_source_buttons(message, mapping: dict[str, str], fallback: str | None) -> list[list[InlineKeyboardButton]]:
@@ -390,6 +430,7 @@ def _build_source_buttons(message, mapping: dict[str, str], fallback: str | None
     if not rows:
         return []
 
+
     built: list[list[InlineKeyboardButton]] = []
     for row in rows:
         out_row: list[InlineKeyboardButton] = []
@@ -407,6 +448,8 @@ def _build_source_buttons(message, mapping: dict[str, str], fallback: str | None
     return built
 
 
+
+
 def _apply_prefix(text: str | None, rule: RepostRule) -> str | None:
     """Prepend the rule's configured prefix text (with a blank line after
     it) to a forwarded message/caption. If there's no body text at all,
@@ -414,6 +457,8 @@ def _apply_prefix(text: str | None, rule: RepostRule) -> str | None:
     if not rule.prefix_text:
         return text
     return f"{rule.prefix_text}\n\n{text}" if text else rule.prefix_text
+
+
 
 
 def _build_button(rule: RepostRule) -> InlineKeyboardMarkup | None:
@@ -431,6 +476,8 @@ def _build_button(rule: RepostRule) -> InlineKeyboardMarkup | None:
     )
 
 
+
+
 def _build_reply_markup(message, rule: RepostRule, dest: Channel) -> InlineKeyboardMarkup | None:
     """Combine the rule's own configured button (if any) with the
     source post's own button(s) - link-translated via
@@ -441,15 +488,19 @@ def _build_reply_markup(message, rule: RepostRule, dest: Channel) -> InlineKeybo
     for posts that had no buttons of either kind."""
     mapping, fallback = _rule_replacement_config(rule, dest)
 
+
     rows: list[list[InlineKeyboardButton]] = []
     own = _build_button(rule)
     if own:
         rows.extend(own.inline_keyboard)
     rows.extend(_build_source_buttons(message, mapping, fallback))
 
+
     if not rows:
         return None
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 
 
 def _build_link_preview(rule: RepostRule) -> LinkPreviewOptions | None:
@@ -471,6 +522,8 @@ def _build_link_preview(rule: RepostRule) -> LinkPreviewOptions | None:
     return None
 
 
+
+
 # ---------------------------------------------------------------------------
 # Album (media-group) buffering.
 #
@@ -487,6 +540,7 @@ def _build_link_preview(rule: RepostRule) -> LinkPreviewOptions | None:
 # Keyed by (chat_id, grouped_id) since Telethon's grouped_id integer is
 # only guaranteed unique within a single chat, not globally.
 # ---------------------------------------------------------------------------
+
 
 # Each buffered entry is (message_id, caption, entities, kind, download_task) -
 # the download itself is kicked off and stored as a Task the moment the item
@@ -505,6 +559,8 @@ _album_tasks: dict[tuple[int, int], asyncio.Task] = {}
 # wider window still means fewer, larger _finalize batches instead of
 # many tiny ones when items trickle in close to the boundary).
 _ALBUM_DEBOUNCE_SECONDS = 2.5
+
+
 
 
 def _build_media_group(items: list[dict], caption: str | None) -> list:
@@ -533,6 +589,8 @@ def _build_media_group(items: list[dict], caption: str | None) -> list:
     return media
 
 
+
+
 async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rules: list[RepostRule]) -> None:
     """Repost a complete, buffered source album as one Telegram album per
     matching rule, via bot.send_media_group - mirrors _repost_single below,
@@ -540,6 +598,7 @@ async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rule
     cap_item = next((it for it in items if it["caption"]), None)
     text = cap_item["caption"] if cap_item else None
     entities = cap_item["entities"] if cap_item else None
+
 
     async with session() as s:
         post = Post(
@@ -552,6 +611,7 @@ async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rule
         s.add(post)
         await s.flush()
 
+
         for i, it in enumerate(items):
             # file_id is left empty here - unlike an operator-composed
             # album (handlers/compose.py), a repost's media came in as raw
@@ -561,12 +621,14 @@ async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rule
             s.add(PostMediaItem(post_id=post.id, position=i, media_type=it["kind"], file_id=""))
         await s.flush()
 
+
         for rule in rules:
             qch = select(Channel).where(Channel.id == rule.destination_channel_id)
             rch = await s.execute(qch)
             dest = rch.scalars().first()
             if not dest:
                 continue
+
 
             cleaned_text = _render_repost_content(text, entities, rule, dest)
             context = {
@@ -587,6 +649,7 @@ async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rule
             # keyboard at all, on any bot), not something skipped by
             # mistake here.
             media = _build_media_group(items, caption or None)
+
 
             try:
                 sent = await bot.send_media_group(chat_id=dest.chat_id, media=media)
@@ -625,12 +688,15 @@ async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rule
                 await s.commit()
                 continue
 
+
         auto_candidates = [r.auto_delete_seconds for r in rules if r.auto_delete_seconds]
         auto_seconds = min(auto_candidates) if auto_candidates else None
         if auto_seconds:
             post.auto_delete_seconds = auto_seconds
             post.delete_at = datetime.utcnow() + timedelta(seconds=auto_seconds)
             await s.commit()
+
+
 
 
 async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list[RepostRule]) -> None:
@@ -641,6 +707,7 @@ async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list
     message = event.message
     key = (event.chat_id, message.grouped_id)
 
+
     if not (message.photo or message.video):
         # Some other media type inside the album this app doesn't support
         # reposting (e.g. a document/audio) - drop just this one item
@@ -650,6 +717,7 @@ async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list
             event.chat_id, message.grouped_id, message.id,
         )
         return
+
 
     # Register this item and (re)start the debounce timer BEFORE awaiting
     # its download - not after, like an earlier version of this function
@@ -673,9 +741,11 @@ async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list
                      getattr(message, "entities", None),
                      "video" if message.video else "photo", download_task))
 
+
     existing = _album_tasks.get(key)
     if existing and not existing.done():
         existing.cancel()
+
 
     async def _finalize():
         try:
@@ -686,6 +756,7 @@ async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list
         _album_tasks.pop(key, None)
         if not entries:
             return
+
 
         collected: list[dict] = []
         for msg_id, caption, entities, kind, task in entries:
@@ -701,6 +772,7 @@ async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list
                 continue
             collected.append({"kind": kind, "bytes": downloaded, "caption": caption, "entities": entities, "id": msg_id})
 
+
         if not collected:
             return
         # Telethon can deliver album items very slightly out of order;
@@ -715,7 +787,10 @@ async def _handle_album_item(bot: Bot, event, source: SourceChannel, rules: list
         except Exception:
             logger.exception("Failed to finalize/repost album chat_id=%s grouped_id=%s", event.chat_id, message.grouped_id)
 
+
     _album_tasks[key] = asyncio.create_task(_finalize())
+
+
 
 
 async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[RepostRule]) -> None:
@@ -731,12 +806,14 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
         downloaded = await message.download_media(bytes)
         video_bytes = downloaded if isinstance(downloaded, (bytes, bytearray)) else None
 
+
     if photo_bytes:
         content_type = ContentType.PHOTO
     elif video_bytes:
         content_type = ContentType.VIDEO
     else:
         content_type = ContentType.TEXT
+
 
     async with session() as s:
         post = Post(
@@ -749,6 +826,7 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
         s.add(post)
         await s.flush()
 
+
         for rule in rules:
             qch = select(Channel).where(Channel.id == rule.destination_channel_id)
             rch = await s.execute(qch)
@@ -756,7 +834,9 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
             if not dest:
                 continue
 
+
             cleaned_text = _render_repost_content(text, entities, rule, dest)
+
 
             context = {
                 "original_text": cleaned_text or "",
@@ -780,6 +860,7 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
             # see _build_reply_markup.
             reply_markup = _build_reply_markup(message, rule, dest)
 
+
             # A text-only post whose entire content was a plain link/@mention
             # with no fallback link configured on this rule ends up with an
             # empty `caption` here (everything got scrubbed out - see
@@ -801,6 +882,7 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
                 s.add(pt)
                 await s.commit()
                 continue
+
 
             try:
                 if photo_bytes:
@@ -827,6 +909,7 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
                         reply_markup=reply_markup,
                         link_preview_options=_build_link_preview(rule),
                     )
+
 
                 pt = PostTarget(post_id=post.id, channel_id=dest.id, message_id=sent.message_id, sent_at=datetime.utcnow())
                 s.add(pt)
@@ -857,12 +940,15 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
                 await s.commit()
                 continue
 
+
         auto_candidates = [r.auto_delete_seconds for r in rules if r.auto_delete_seconds]
         auto_seconds = min(auto_candidates) if auto_candidates else None
         if auto_seconds:
             post.auto_delete_seconds = auto_seconds
             post.delete_at = datetime.utcnow() + timedelta(seconds=auto_seconds)
             await s.commit()
+
+
 
 
 async def handle_incoming_message(bot: Bot, event) -> None:
@@ -885,8 +971,10 @@ async def handle_incoming_message(bot: Bot, event) -> None:
         logger.info("repost-debug: event.get_chat() returned None for chat_id=%s - skipping", event.chat_id)
         return
 
+
     identifier_str = str(event.chat_id)
     username = getattr(chat, "username", None) or ""
+
 
     # Match against every form a source's identifier could have been saved
     # in: the numeric chat id, the bare username Telethon reports (no "@"),
@@ -896,6 +984,7 @@ async def handle_incoming_message(bot: Bot, event) -> None:
         candidates.add(username)
         candidates.add(f"@{username}")
 
+
     # TEMPORARY diagnostic logging - trace every incoming message through the
     # matching pipeline so a "still not forwarding" report can be root-caused
     # from the logs instead of guessed at. Safe to remove once forwarding is
@@ -904,6 +993,7 @@ async def handle_incoming_message(bot: Bot, event) -> None:
         "repost-debug: incoming message chat_id=%s username=%r candidates=%s grouped_id=%s",
         identifier_str, username, sorted(candidates), getattr(message, "grouped_id", None),
     )
+
 
     async with session() as s:
         q = select(SourceChannel).where(SourceChannel.identifier.in_(candidates))
@@ -919,16 +1009,27 @@ async def handle_incoming_message(bot: Bot, event) -> None:
             )
             return
 
+
         logger.info("repost-debug: matched source id=%s identifier=%r title=%r", source.id, source.identifier, source.title)
 
-        q2 = select(RepostRule).where(RepostRule.source_channel_id == source.id)
+
+        # .enabled filter: a rule that's been paused via the "Pause
+        # Forwarding" button (fwd:toggle: callback in handlers/repost_rules.py)
+        # stays in the DB with all its config intact, it's just skipped here
+        # - so resuming later is a single tap, not re-entering everything.
+        q2 = select(RepostRule).where(
+            RepostRule.source_channel_id == source.id,
+            RepostRule.enabled.is_(True),
+        )
         res2 = await s.execute(q2)
         rules = res2.scalars().all()
         if not rules:
-            logger.info("repost-debug: source id=%s matched but has NO RepostRule rows - nothing to forward to", source.id)
+            logger.info("repost-debug: source id=%s matched but has no ENABLED RepostRule rows - nothing to forward to (rule(s) may exist but be paused)", source.id)
             return
 
+
         logger.info("repost-debug: source id=%s has %d rule(s) - proceeding to repost", source.id, len(rules))
+
 
     # source/rules are plain ORM objects loaded with expire_on_commit=False
     # (see db.py), so they stay usable after the session above closes -
@@ -937,5 +1038,6 @@ async def handle_incoming_message(bot: Bot, event) -> None:
     if getattr(message, "grouped_id", None):
         await _handle_album_item(bot, event, source, rules)
         return
+
 
     await _repost_single(bot, message, source, rules)
