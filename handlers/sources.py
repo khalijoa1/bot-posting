@@ -7,6 +7,7 @@ need to remember chat ids or command syntax, just tap through.
 """
 import re
 
+
 from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
@@ -14,11 +15,15 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+
 from db import session
 from handlers.common import main_menu_kb
 from models import RepostRule, SourceChannel
 
+
 router = Router()
+
+
 
 
 class SourceUIState(StatesGroup):
@@ -26,11 +31,15 @@ class SourceUIState(StatesGroup):
     title = State()
 
 
+
+
 # Matches a t.me (or telegram.me) share link, with or without scheme/www,
 # capturing just the path after the domain (e.g. "bnnkenya" out of
 # "https://t.me/bnnkenya", or "joinchat/xyz" for a private invite link,
 # which is left as-is since it isn't a resolvable username anyway).
 _TME_URL_RE = re.compile(r"^(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/", re.IGNORECASE)
+
+
 
 
 def _normalize_identifier(raw: str) -> str:
@@ -63,11 +72,15 @@ def _normalize_identifier(raw: str) -> str:
     return raw
 
 
+
+
 def _cancel_kb():
     return types.ReplyKeyboardMarkup(
         keyboard=[[types.KeyboardButton(text="❌ Cancel")]],
         resize_keyboard=True,
     )
+
+
 
 
 async def _forwarding_view() -> tuple[str, types.InlineKeyboardMarkup]:
@@ -77,6 +90,7 @@ async def _forwarding_view() -> tuple[str, types.InlineKeyboardMarkup]:
         q = select(SourceChannel)
         res = await s.execute(q)
         sources = res.scalars().all()
+
 
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -90,6 +104,7 @@ async def _forwarding_view() -> tuple[str, types.InlineKeyboardMarkup]:
     else:
         lines.append(f"Sources watched: {len(sources)}\nTap one to manage its forwarding rules:")
 
+
     rows = [
         [types.InlineKeyboardButton(
             text=f"📡 {s.title or s.identifier}", callback_data=f"fwd:src:{s.id}"
@@ -99,7 +114,10 @@ async def _forwarding_view() -> tuple[str, types.InlineKeyboardMarkup]:
     rows.append([types.InlineKeyboardButton(text="➕ Add Source", callback_data="fwd:addsrc")])
     rows.append([types.InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")])
 
+
     return "\n".join(lines), types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 
 
 async def show_forwarding_root(target) -> None:
@@ -112,6 +130,8 @@ async def show_forwarding_root(target) -> None:
         await target.edit_text(text, reply_markup=kb)
     except Exception:
         await target.answer(text, reply_markup=kb)
+
+
 
 
 async def _source_detail_view(source_id: int) -> tuple[str, types.InlineKeyboardMarkup] | None:
@@ -128,6 +148,7 @@ async def _source_detail_view(source_id: int) -> tuple[str, types.InlineKeyboard
         res = await s.execute(q)
         rules = res.scalars().all()
 
+
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📡 {source.title or source.identifier}\n"
@@ -139,9 +160,11 @@ async def _source_detail_view(source_id: int) -> tuple[str, types.InlineKeyboard
     else:
         lines.append(f"Forwarding into {len(rules)} channel(s) - tap one to edit its link replacements:")
 
+
     rows = [
         [types.InlineKeyboardButton(
-            text=f"➡️ {r.destination.title if r.destination else '(channel removed)'}",
+            text=f"{'➡️' if r.enabled else '⏸️'} {r.destination.title if r.destination else '(channel removed)'}"
+                 f"{'' if r.enabled else ' (paused)'}",
             callback_data=f"fwd:rule:{r.id}",
         )]
         for r in rules
@@ -150,7 +173,10 @@ async def _source_detail_view(source_id: int) -> tuple[str, types.InlineKeyboard
     rows.append([types.InlineKeyboardButton(text="🗑️ Remove Source", callback_data=f"fwd:delsrc:{source_id}")])
     rows.append([types.InlineKeyboardButton(text="🔙 Back", callback_data="fwd:root")])
 
+
     return "\n".join(lines), types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 
 
 @router.callback_query(F.data == "fwd:root")
@@ -158,6 +184,8 @@ async def cb_forwarding_root(query: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await show_forwarding_root(query.message)
     await query.answer()
+
+
 
 
 @router.callback_query(F.data.startswith("fwd:src:"))
@@ -172,6 +200,8 @@ async def cb_source_detail(query: types.CallbackQuery):
     await query.answer()
 
 
+
+
 @router.callback_query(F.data.startswith("fwd:delsrc:"))
 async def cb_delete_source(query: types.CallbackQuery):
     source_id = int(query.data.split(":")[2])
@@ -182,6 +212,8 @@ async def cb_delete_source(query: types.CallbackQuery):
             await s.commit()
     await query.answer("Source removed")
     await show_forwarding_root(query.message)
+
+
 
 
 @router.callback_query(F.data == "fwd:addsrc")
@@ -195,10 +227,14 @@ async def cb_add_source_start(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
 
 
+
+
 @router.message(SourceUIState.identifier, F.text == "❌ Cancel")
 async def cancel_add_source_identifier(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
 
 
 @router.message(SourceUIState.identifier, F.text)
@@ -208,6 +244,7 @@ async def get_source_identifier(message: types.Message, state: FSMContext):
         await message.answer("❌ Send a @username or numeric chat id", reply_markup=_cancel_kb())
         return
 
+
     async with session() as s:
         q = select(SourceChannel).where(SourceChannel.identifier == identifier)
         res = await s.execute(q)
@@ -215,6 +252,7 @@ async def get_source_identifier(message: types.Message, state: FSMContext):
             await message.answer("❌ That source is already being watched", reply_markup=main_menu_kb())
             await state.clear()
             return
+
 
     await state.update_data(identifier=identifier)
     await message.answer(
@@ -224,10 +262,14 @@ async def get_source_identifier(message: types.Message, state: FSMContext):
     await state.set_state(SourceUIState.title)
 
 
+
+
 @router.message(SourceUIState.title, F.text == "❌ Cancel")
 async def cancel_add_source_title(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
 
 
 @router.message(SourceUIState.title, F.text)
@@ -236,6 +278,7 @@ async def get_source_title(message: types.Message, state: FSMContext):
     title = None if raw.lower() in ("skip", "no", "") else raw
     data = await state.get_data()
     identifier = data.get("identifier")
+
 
     async with session() as s:
         sc = SourceChannel(
@@ -246,14 +289,18 @@ async def get_source_title(message: types.Message, state: FSMContext):
         s.add(sc)
         await s.commit()
 
+
     await state.clear()
     text, kb = await _forwarding_view()
     await message.answer(f"✅ Now watching {title or identifier}\n\n" + text, reply_markup=kb)
 
 
+
+
 # ---------------------------------------------------------------------------
 # Backward-compatible text commands.
 # ---------------------------------------------------------------------------
+
 
 @router.message(Command("add_source"))
 async def add_source(message: types.Message, command: CommandObject):
@@ -282,6 +329,8 @@ async def add_source(message: types.Message, command: CommandObject):
     await message.reply(f"Added source {identifier} title={title}")
 
 
+
+
 @router.message(Command("list_sources"))
 async def list_sources(message: types.Message):
     async with session() as s:
@@ -293,6 +342,8 @@ async def list_sources(message: types.Message):
         return
     lines = [f"ID={r.id} identifier={r.identifier} title={r.title}" for r in rows]
     await message.reply("\n".join(lines))
+
+
 
 
 @router.message(Command("remove_source"))
