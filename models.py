@@ -1,10 +1,13 @@
 import enum
 from datetime import datetime
 
+
 from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, String, Table, UniqueConstraint, func, Boolean, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+
 from db import Base
+
 
 channel_categories = Table(
     "channel_categories",
@@ -14,21 +17,28 @@ channel_categories = Table(
 )
 
 
+
+
 class Category(Base):
     __tablename__ = "categories"
+
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     owner_user_id: Mapped[int] = mapped_column(Integer, index=True)
     name: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+
     channels: Mapped[list["Channel"]] = relationship(
         secondary=channel_categories, back_populates="categories"
     )
 
 
+
+
 class Channel(Base):
     __tablename__ = "channels"
+
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     owner_user_id: Mapped[int] = mapped_column(Integer, index=True)
@@ -65,6 +75,7 @@ class Channel(Base):
     auto_comment_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+
     targets: Mapped[list["PostTarget"]] = relationship(back_populates="channel")
     categories: Mapped[list["Category"]] = relationship(
         secondary=channel_categories, back_populates="channels"
@@ -74,11 +85,15 @@ class Channel(Base):
     )
 
 
+
+
 class ContentType(str, enum.Enum):
     TEXT = "text"
     PHOTO = "photo"
     VIDEO = "video"
     ALBUM = "album"
+
+
 
 
 class PostStatus(str, enum.Enum):
@@ -89,8 +104,11 @@ class PostStatus(str, enum.Enum):
     DELETED = "deleted"
 
 
+
+
 class Post(Base):
     __tablename__ = "posts"
+
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     owner_user_id: Mapped[int] = mapped_column(Integer, index=True)
@@ -119,10 +137,13 @@ class Post(Base):
     button_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+
     targets: Mapped[list["PostTarget"]] = relationship(back_populates="post", cascade="all, delete-orphan")
     media_items: Mapped[list["PostMediaItem"]] = relationship(
         back_populates="post", cascade="all, delete-orphan", order_by="PostMediaItem.position"
     )
+
+
 
 
 class PostMediaItem(Base):
@@ -134,7 +155,9 @@ class PostMediaItem(Base):
     reconstructed later.
     """
 
+
     __tablename__ = "post_media_items"
+
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     post_id: Mapped[int] = mapped_column(ForeignKey("posts.id", ondelete="CASCADE"))
@@ -142,13 +165,18 @@ class PostMediaItem(Base):
     media_type: Mapped[str] = mapped_column(String(16))  # "photo" | "video"
     file_id: Mapped[str] = mapped_column(String(255))
 
+
     post: Mapped["Post"] = relationship(back_populates="media_items")
+
+
 
 
 class PostTarget(Base):
     """One row per (post, channel) - carries the per-channel message_id once sent."""
 
+
     __tablename__ = "post_targets"
+
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     post_id: Mapped[int] = mapped_column(ForeignKey("posts.id", ondelete="CASCADE"))
@@ -161,14 +189,19 @@ class PostTarget(Base):
     extra_message_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+
     post: Mapped["Post"] = relationship(back_populates="targets")
     channel: Mapped["Channel"] = relationship(back_populates="targets")
+
+
 
 
 class SourceChannel(Base):
     """A public channel that the userbot watches for new posts."""
 
+
     __tablename__ = "source_channels"
+
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     owner_user_id: Mapped[int] = mapped_column(Integer, index=True)
@@ -176,14 +209,19 @@ class SourceChannel(Base):
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+
     rules: Mapped[list["RepostRule"]] = relationship(back_populates="source", cascade="all, delete-orphan")
+
+
 
 
 class RepostRule(Base):
     """Maps a watched source channel to a destination channel the bot posts copies into."""
 
+
     __tablename__ = "repost_rules"
     __table_args__ = (UniqueConstraint("source_channel_id", "destination_channel_id", name="uq_repost_rule"),)
+
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source_channel_id: Mapped[int] = mapped_column(ForeignKey("source_channels.id", ondelete="CASCADE"))
@@ -207,10 +245,18 @@ class RepostRule(Base):
     # "disabled", "small", "large", "above" (preview shown above the text
     # instead of below). See services/reposter.py:_build_link_preview.
     link_preview_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Pause/resume forwarding without deleting the rule (and losing its
+    # replacements/prefix/button config). False means services/reposter.py
+    # simply skips this rule when new source posts come in - see the
+    # RepostRule.enabled filter in _handle_new_message's rule query.
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
 
     source: Mapped["SourceChannel"] = relationship(back_populates="rules")
     destination: Mapped["Channel"] = relationship()
+
+
 
 
 class ChannelStatSnapshot(Base):
@@ -218,14 +264,19 @@ class ChannelStatSnapshot(Base):
     periodically by services/stats.py so /analytics can show growth over
     time instead of just a single current number."""
 
+
     __tablename__ = "channel_stat_snapshots"
+
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
     member_count: Mapped[int] = mapped_column(Integer)
     taken_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
+
     channel: Mapped["Channel"] = relationship(back_populates="stat_snapshots")
+
+
 
 
 class LinkPolicy(str, enum.Enum):
@@ -234,16 +285,22 @@ class LinkPolicy(str, enum.Enum):
     ADMINS_ONLY = "admins_only"
 
 
+
+
 class SpamAction(str, enum.Enum):
     DELETE_ONLY = "delete_only"
     WARN_MUTE = "warn_mute"
     DELETE_KICK = "delete_kick"
 
 
+
+
 class ModeratedGroup(Base):
     """A group/supergroup the operator has opted into automatic moderation for."""
 
+
     __tablename__ = "moderated_groups"
+
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     owner_user_id: Mapped[int] = mapped_column(Integer, index=True)
@@ -269,9 +326,12 @@ class ModeratedGroup(Base):
     welcome_buttons_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+
     recurring_messages: Mapped[list["RecurringMessage"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
     )
+
+
 
 
 class RecurringMessage(Base):
@@ -281,7 +341,9 @@ class RecurringMessage(Base):
     services/recurring.py rather than on-join. A group can have several of
     these (e.g. a rules reminder every 12h and a promo every 24h)."""
 
+
     __tablename__ = "recurring_messages"
+
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("moderated_groups.id", ondelete="CASCADE"), index=True)
@@ -294,7 +356,10 @@ class RecurringMessage(Base):
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+
     group: Mapped["ModeratedGroup"] = relationship(back_populates="recurring_messages")
+
+
 
 
 class BroadcastUser(Base):
@@ -315,7 +380,9 @@ class BroadcastUser(Base):
     re-attempting dead ends on every future broadcast.
     """
 
+
     __tablename__ = "broadcast_users"
+
 
     user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
