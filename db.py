@@ -3,18 +3,25 @@ import re
 from collections.abc import AsyncIterator
 from datetime import datetime
 
+
 from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
+
 from config import get_settings
+
 
 logger = logging.getLogger(__name__)
 
 
+
+
 class Base(DeclarativeBase):
     pass
+
+
 
 
 # timeout=30 sets sqlite3's busy_timeout (seconds) on every new connection -
@@ -29,6 +36,8 @@ engine = create_async_engine(
     get_settings().database_url, echo=False, connect_args={"timeout": 30}
 )
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+
 
 
 @event.listens_for(engine.sync_engine, "connect")
@@ -47,12 +56,15 @@ def _set_sqlite_pragmas(dbapi_connection, connection_record):
     cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.close()
 
+
 # Same normalization handlers/sources.py's _normalize_identifier() applies
 # to newly-typed identifiers - duplicated here (rather than imported) so
 # this one-time data cleanup below has no dependency on the handlers
 # package, matching every other migration in this function being
 # self-contained SQL/PRAGMA calls.
 _TME_URL_RE = re.compile(r"^(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/", re.IGNORECASE)
+
+
 
 
 def _clean_identifier(raw: str) -> str:
@@ -63,8 +75,11 @@ def _clean_identifier(raw: str) -> str:
     return raw
 
 
+
+
 async def init_db() -> None:
     import models  # noqa: F401 - registers models on Base.metadata
+
 
     async with engine.begin() as conn:
         # One-time schema fix: the "posts" table was originally created with
@@ -110,12 +125,14 @@ async def init_db() -> None:
             )
             await conn.exec_driver_sql("DROP TABLE posts_old")
 
+
         # Simple additive column: existing post_targets rows just get NULL
         # here, which is fine (they only ever sent a single message anyway).
         result2 = await conn.exec_driver_sql("PRAGMA table_info('post_targets')")
         cols = [r[1] for r in result2.fetchall()]
         if cols and "extra_message_ids" not in cols:
             await conn.exec_driver_sql("ALTER TABLE post_targets ADD COLUMN extra_message_ids TEXT")
+
 
         # Simple additive column: powers the recurring-post feature. NULL
         # for every existing post just means "doesn't repeat", which is the
@@ -124,6 +141,7 @@ async def init_db() -> None:
         post_cols = [r[1] for r in result3.fetchall()]
         if post_cols and "repeat_interval_seconds" not in post_cols:
             await conn.exec_driver_sql("ALTER TABLE posts ADD COLUMN repeat_interval_seconds INTEGER")
+
 
         # Simple additive columns: optional inline button on a composed post
         # (handlers/compose.py) - mirrors repost_rules' own
@@ -134,6 +152,7 @@ async def init_db() -> None:
             await conn.exec_driver_sql("ALTER TABLE posts ADD COLUMN button_text VARCHAR(64)")
         if post_cols and "button_url" not in post_cols:
             await conn.exec_driver_sql("ALTER TABLE posts ADD COLUMN button_url VARCHAR(512)")
+
 
         # Simple additive columns: per-rule inline button / prefix text /
         # link preview mode on forwarded posts. NULL on every existing rule
@@ -149,6 +168,11 @@ async def init_db() -> None:
             await conn.exec_driver_sql("ALTER TABLE repost_rules ADD COLUMN prefix_text VARCHAR(512)")
         if rule_cols and "link_preview_mode" not in rule_cols:
             await conn.exec_driver_sql("ALTER TABLE repost_rules ADD COLUMN link_preview_mode VARCHAR(16)")
+        if rule_cols and "enabled" not in rule_cols:
+            await conn.exec_driver_sql(
+                "ALTER TABLE repost_rules ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT 1"
+            )
+
 
         # Simple additive column: force-subscribe gate on join-request
         # approval. NULL/empty means no gate - approval works exactly like
@@ -158,12 +182,14 @@ async def init_db() -> None:
         if chan_cols and "required_join_json" not in chan_cols:
             await conn.exec_driver_sql("ALTER TABLE channels ADD COLUMN required_join_json TEXT")
 
+
         # Simple additive column: message DMed to a user the moment their
         # join request comes in, before approval happens (see
         # handlers/join_requests.py). NULL means no pre-approval message is
         # sent - existing channels keep behaving exactly as before.
         if chan_cols and "pre_approval_message" not in chan_cols:
             await conn.exec_driver_sql("ALTER TABLE channels ADD COLUMN pre_approval_message TEXT")
+
 
         # Simple additive columns: auto-comment (a fixed message the bot
         # replies with in a channel's linked discussion group under every
@@ -177,6 +203,7 @@ async def init_db() -> None:
             )
         if chan_cols and "auto_comment_text" not in chan_cols:
             await conn.exec_driver_sql("ALTER TABLE channels ADD COLUMN auto_comment_text TEXT")
+
 
         # Simple additive columns: per-group welcome message (sent when
         # someone new joins a moderated group - see
@@ -199,9 +226,11 @@ async def init_db() -> None:
         if mg_cols and "welcome_buttons_json" not in mg_cols:
             await conn.exec_driver_sql("ALTER TABLE moderated_groups ADD COLUMN welcome_buttons_json TEXT")
 
+
         # recurring_messages is a brand-new table (models.RecurringMessage) -
         # create_all below handles it automatically, no ALTER needed.
         await conn.run_sync(Base.metadata.create_all)
+
 
         # One-time data cleanup: handlers/sources.py's "Add Source" flow
         # (and the /add_source command) previously stored whatever an
@@ -249,6 +278,7 @@ async def init_db() -> None:
                         src_id, identifier, cleaned,
                     )
 
+
         # One-time data repair: a bug in services/scheduler.py's
         # run_post_send_loop (now fixed) unconditionally marked a repeating
         # post SENT even when every target failed to send, leaving it with
@@ -292,6 +322,7 @@ async def init_db() -> None:
                 )
             logger.warning("Resumed %d stuck repeating post(s): %s", len(stuck_ids), stuck_ids)
 
+
         # ONE-TIME KICKSTART (requested by operator): force every currently
         # repeating post to send right now, on this boot, then carry on
         # with its normal repeat cycle exactly as before. This is
@@ -299,6 +330,7 @@ async def init_db() -> None:
         # block in a follow-up commit so it doesn't pointlessly re-fire on
         # every future restart.
         now_str2 = datetime.utcnow().isoformat(sep=" ")
+
 
         # Posts still waiting for their first/next send - just pull their
         # scheduled_time to now so the normal send loop picks them up on
@@ -311,6 +343,7 @@ async def init_db() -> None:
             await conn.exec_driver_sql(
                 "UPDATE posts SET scheduled_time = ? WHERE id = ?", (now_str2, pid)
             )
+
 
         # Posts already SENT with no auto-delete configured - clear their
         # per-target sent state and put them back to SCHEDULED so they
@@ -333,6 +366,7 @@ async def init_db() -> None:
                 (now_str2, pid),
             )
 
+
         # Posts already SENT with auto-delete configured - the scheduler's
         # delete_at-based recycle path handles these normally, so just pull
         # their delete_at to now so that path fires immediately instead of
@@ -344,6 +378,7 @@ async def init_db() -> None:
         ids_c = [r[0] for r in res_c.fetchall()]
         for pid in ids_c:
             await conn.exec_driver_sql("UPDATE posts SET delete_at = ? WHERE id = ?", (now_str2, pid))
+
 
         # Posts that got stuck in DELETED status despite still having a
         # repeat interval set - this happens for any repeating post that
@@ -370,11 +405,13 @@ async def init_db() -> None:
                 (now_str2, pid),
             )
 
+
         if ids_a or ids_b or ids_c or ids_d:
             logger.warning(
                 "Kickstarted repeating posts - immediate: %s, via delete+recycle: %s, revived from DELETED: %s",
                 ids_a + ids_b, ids_c, ids_d,
             )
+
 
         # ONE-TIME CLEANUP (requested by operator): stop every currently-
         # repeating post that has NO inline button configured (button_text
@@ -417,6 +454,8 @@ async def init_db() -> None:
         )
 
 
+
+
         # ONE-TIME DIAGNOSTIC (requested by operator, follow-up to the
         # buttonless-cleanup block above): the previous deploy of that
         # cleanup logged nothing at all - no "Stopped N buttonless
@@ -448,6 +487,7 @@ async def init_db() -> None:
             ],
         )
 
+
         # ONE-TIME DIAGNOSTIC #2 (requested by operator): the operator
         # says buttonless recurring posts still exist even though the DIAG
         # above (posts.repeat_interval_seconds) came back empty. There is
@@ -478,6 +518,7 @@ async def init_db() -> None:
             ],
         )
 
+
         # ONE-TIME CLEANUP #2 (requested by operator, follow-up to DIAG2
         # above): stop the buttonless recurring_messages row(s) found - the
         # same "stop it if it has no button, leave it alone if it does"
@@ -501,6 +542,7 @@ async def init_db() -> None:
                 "Stopped %d buttonless recurring_message(s): %s",
                 len(rm_stopped_ids), rm_stopped_ids,
             )
+
 
         # ONE-TIME DIAGNOSTIC #3 (requested by operator): list every post
         # that has both button_text and button_url set, regardless of
@@ -527,6 +569,7 @@ async def init_db() -> None:
                 for r in diag3_rows
             ],
         )
+
 
         # ONE-TIME DIAGNOSTIC #4 (requested by operator): the operator
         # previously had posts 474, 483, 489, 922, 925, 991, 1230 set to a
@@ -561,6 +604,7 @@ async def init_db() -> None:
             ],
             diag4_missing_ids,
         )
+
 
 def session() -> AsyncSession:
     return async_session_factory()
