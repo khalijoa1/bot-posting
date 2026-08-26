@@ -12,6 +12,7 @@ set link replacements by just sending "old -> new" lines.
 """
 import json
 
+
 from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
@@ -19,11 +20,15 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+
 from db import session
 from handlers.common import main_menu_kb
 from models import Channel, RepostRule, SourceChannel
 
+
 router = Router()
+
+
 
 
 class RuleUIState(StatesGroup):
@@ -34,11 +39,15 @@ class RuleUIState(StatesGroup):
     default_link = State()
 
 
+
+
 def _cancel_kb():
     return types.ReplyKeyboardMarkup(
         keyboard=[[types.KeyboardButton(text="❌ Cancel")]],
         resize_keyboard=True,
     )
+
+
 
 
 def _parse_replacements(text: str) -> tuple[dict[str, str], str | None]:
@@ -79,6 +88,8 @@ def _parse_replacements(text: str) -> tuple[dict[str, str], str | None]:
     return mapping, fallback
 
 
+
+
 async def _rule_detail_view(rule_id: int) -> tuple[str, types.InlineKeyboardMarkup] | None:
     async with session() as s:
         rule = await s.get(
@@ -97,9 +108,12 @@ async def _rule_detail_view(rule_id: int) -> tuple[str, types.InlineKeyboardMark
         mapping = repls.get("default", {}) if isinstance(repls, dict) else {}
         fallback = repls.get("fallback") if isinstance(repls, dict) else None
 
+
+    status_line = "✅ Active" if rule.enabled else "⏸️ Paused (not forwarding)"
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"➡️ {source_label}  →  {dest_label}\n"
+        f"Status: {status_line}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
     ]
     if mapping:
@@ -117,6 +131,7 @@ async def _rule_detail_view(rule_id: int) -> tuple[str, types.InlineKeyboardMark
             "Tap \"Set Default Link\" below to fix that."
         )
 
+
     lines.append("")
     if rule.inline_button_text and rule.inline_button_url:
         lines.append(f"🔘 Button: [{rule.inline_button_text}] → {rule.inline_button_url}")
@@ -133,11 +148,15 @@ async def _rule_detail_view(rule_id: int) -> tuple[str, types.InlineKeyboardMark
     }
     lines.append(f"🔍 Link preview (text posts only): {preview_labels.get(rule.link_preview_mode, 'Telegram default')}")
 
+
     # Built sequentially (each "Set X" row immediately followed by its own
     # "Remove X" row when applicable) rather than via post-hoc insert(index,
     # ...) calls - that indexed-insert approach is exactly the kind of thing
     # that quietly breaks the moment a row is added or reordered above it.
-    rows = [[types.InlineKeyboardButton(text="✏️ Edit Word/Link Replacements", callback_data=f"fwd:editrepl:{rule_id}")]]
+    toggle_label = "⏸️ Pause Forwarding" if rule.enabled else "▶️ Resume Forwarding"
+    rows = [[types.InlineKeyboardButton(text=toggle_label, callback_data=f"fwd:toggle:{rule_id}")]]
+    rows.append([types.InlineKeyboardButton(text="✏️ Edit Word/Link Replacements", callback_data=f"fwd:editrepl:{rule_id}")])
+
 
     rows.append([types.InlineKeyboardButton(
         text=("🔗 Edit Default Link" if fallback else "🔗 Set Default Link"),
@@ -146,18 +165,23 @@ async def _rule_detail_view(rule_id: int) -> tuple[str, types.InlineKeyboardMark
     if fallback:
         rows.append([types.InlineKeyboardButton(text="🚫 Remove Default Link", callback_data=f"fwd:deldefault:{rule_id}")])
 
+
     rows.append([types.InlineKeyboardButton(text="🔘 Set Button", callback_data=f"fwd:editbtn:{rule_id}")])
     if rule.inline_button_text and rule.inline_button_url:
         rows.append([types.InlineKeyboardButton(text="🚫 Remove Button", callback_data=f"fwd:delbtn:{rule_id}")])
+
 
     rows.append([types.InlineKeyboardButton(text="📝 Set Prefix Text", callback_data=f"fwd:editprefix:{rule_id}")])
     if rule.prefix_text:
         rows.append([types.InlineKeyboardButton(text="🚫 Remove Prefix", callback_data=f"fwd:delprefix:{rule_id}")])
 
+
     rows.append([types.InlineKeyboardButton(text="🔍 Link Preview", callback_data=f"fwd:previewmenu:{rule_id}")])
     rows.append([types.InlineKeyboardButton(text="🗑️ Remove Rule", callback_data=f"fwd:delrule:{rule_id}")])
     rows.append([types.InlineKeyboardButton(text="🔙 Back", callback_data=f"fwd:src:{source_id}")])
     return "\n".join(lines), types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 
 
 @router.callback_query(F.data.startswith("fwd:rule:"))
@@ -172,10 +196,13 @@ async def cb_rule_detail(query: types.CallbackQuery):
     await query.answer()
 
 
+
+
 @router.callback_query(F.data.startswith("fwd:addrule:"))
 async def cb_add_rule_pick_dest(query: types.CallbackQuery):
     """Show every registered channel as a destination pick for this source."""
     source_id = int(query.data.split(":")[2])
+
 
     async with session() as s:
         source = await s.get(SourceChannel, source_id)
@@ -189,20 +216,24 @@ async def cb_add_rule_pick_dest(query: types.CallbackQuery):
         existing_res = await s.execute(existing_q)
         already = {row[0] for row in existing_res.all()}
 
+
     if not channels:
         await query.answer("Add a destination channel first (📍 Channels)", show_alert=True)
         return
+
 
     available = [ch for ch in channels if ch.id not in already]
     if not available:
         await query.answer("Already forwarding into every registered channel", show_alert=True)
         return
 
+
     rows = [
         [types.InlineKeyboardButton(text=f"📍 {ch.title}", callback_data=f"fwd:pickdest:{source_id}:{ch.id}")]
         for ch in available
     ]
     rows.append([types.InlineKeyboardButton(text="🔙 Back", callback_data=f"fwd:src:{source_id}")])
+
 
     await query.message.edit_text(
         f"➡️ Pick a channel for {source.title or source.identifier} to forward into:",
@@ -211,10 +242,13 @@ async def cb_add_rule_pick_dest(query: types.CallbackQuery):
     await query.answer()
 
 
+
+
 @router.callback_query(F.data.startswith("fwd:pickdest:"))
 async def cb_add_rule_create(query: types.CallbackQuery):
     _, _, source_id_s, dest_id_s = query.data.split(":")
     source_id, dest_id = int(source_id_s), int(dest_id_s)
+
 
     async with session() as s:
         existing_q = select(RepostRule).where(
@@ -233,9 +267,12 @@ async def cb_add_rule_create(query: types.CallbackQuery):
         await s.commit()
         rule_id = rule.id
 
+
     await query.answer("Rule added")
     text, kb = await _rule_detail_view(rule_id)
     await query.message.edit_text(text, reply_markup=kb)
+
+
 
 
 @router.callback_query(F.data.startswith("fwd:delrule:"))
@@ -257,6 +294,8 @@ async def cb_delete_rule(query: types.CallbackQuery):
             return
     from handlers.sources import show_forwarding_root
     await show_forwarding_root(query.message)
+
+
 
 
 @router.callback_query(F.data.startswith("fwd:editrepl:"))
@@ -282,10 +321,14 @@ async def cb_edit_replacements_start(query: types.CallbackQuery, state: FSMConte
     await query.answer()
 
 
+
+
 @router.message(RuleUIState.replacements, F.text == "❌ Cancel")
 async def cancel_edit_replacements(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
 
 
 @router.message(RuleUIState.replacements, F.text)
@@ -293,6 +336,7 @@ async def apply_replacements(message: types.Message, state: FSMContext):
     data = await state.get_data()
     rule_id = data.get("rule_id")
     raw = message.text.strip()
+
 
     if raw.lower() == "clear":
         mapping: dict[str, str] = {}
@@ -306,6 +350,7 @@ async def apply_replacements(message: types.Message, state: FSMContext):
                 reply_markup=_cancel_kb(),
             )
             return
+
 
     async with session() as s:
         rule = await s.get(RepostRule, rule_id)
@@ -329,6 +374,7 @@ async def apply_replacements(message: types.Message, state: FSMContext):
         rule.replacements_json = json.dumps(repls)
         await s.commit()
 
+
     await state.clear()
     if mapping:
         await message.answer(f"✅ Saved {len(mapping)} specific replacement(s) for this rule.")
@@ -336,6 +382,8 @@ async def apply_replacements(message: types.Message, state: FSMContext):
         await message.answer("✅ Cleared this rule's specific replacements.")
     text, kb = await _rule_detail_view(rule_id)
     await message.answer(text, reply_markup=kb)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +395,7 @@ async def apply_replacements(message: types.Message, state: FSMContext):
 # previously the only way to set it was the "* -> ..." shorthand buried
 # inside the free-text replacements editor above.
 # ---------------------------------------------------------------------------
+
 
 @router.callback_query(F.data.startswith("fwd:editdefault:"))
 async def cb_edit_default_link_start(query: types.CallbackQuery, state: FSMContext):
@@ -369,10 +418,14 @@ async def cb_edit_default_link_start(query: types.CallbackQuery, state: FSMConte
     await query.answer()
 
 
+
+
 @router.message(RuleUIState.default_link, F.text == "❌ Cancel")
 async def cancel_edit_default_link(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
 
 
 @router.message(RuleUIState.default_link, F.text)
@@ -383,6 +436,7 @@ async def save_default_link(message: types.Message, state: FSMContext):
     if not value:
         await message.answer("❌ Send a link or @username", reply_markup=_cancel_kb())
         return
+
 
     async with session() as s:
         rule = await s.get(RepostRule, rule_id)
@@ -401,10 +455,13 @@ async def save_default_link(message: types.Message, state: FSMContext):
         rule.replacements_json = json.dumps(repls)
         await s.commit()
 
+
     await state.clear()
     await message.answer(f"✅ Default link set: {value}\n\nEvery other link/@username in a forwarded post will now be replaced with this instead of removed.")
     text, kb = await _rule_detail_view(rule_id)
     await message.answer(text, reply_markup=kb)
+
+
 
 
 @router.callback_query(F.data.startswith("fwd:deldefault:"))
@@ -427,9 +484,35 @@ async def cb_remove_default_link(query: types.CallbackQuery):
     await query.message.edit_text(text, reply_markup=kb)
 
 
+
+
+@router.callback_query(F.data.startswith("fwd:toggle:"))
+async def cb_toggle_rule(query: types.CallbackQuery):
+    """Pause/resume this rule's forwarding without touching its config -
+    services/reposter.py simply skips disabled rules when new source posts
+    come in, so nothing here needs to know about the repost pipeline."""
+    rule_id = int(query.data.split(":")[2])
+    new_state = None
+    async with session() as s:
+        rule = await s.get(RepostRule, rule_id)
+        if rule:
+            rule.enabled = not rule.enabled
+            new_state = rule.enabled
+            await s.commit()
+    if new_state is None:
+        await query.answer("Rule not found", show_alert=True)
+        return
+    await query.answer("▶️ Forwarding resumed" if new_state else "⏸️ Forwarding paused")
+    text, kb = await _rule_detail_view(rule_id)
+    await query.message.edit_text(text, reply_markup=kb)
+
+
+
+
 # ---------------------------------------------------------------------------
 # Inline button (text + link) on every post this rule forwards.
 # ---------------------------------------------------------------------------
+
 
 @router.callback_query(F.data.startswith("fwd:editbtn:"))
 async def cb_edit_button_start(query: types.CallbackQuery, state: FSMContext):
@@ -445,10 +528,14 @@ async def cb_edit_button_start(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
 
 
+
+
 @router.message(RuleUIState.button_text, F.text == "❌ Cancel")
 async def cancel_edit_button_text(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
 
 
 @router.message(RuleUIState.button_text, F.text)
@@ -466,10 +553,14 @@ async def get_button_text(message: types.Message, state: FSMContext):
     )
 
 
+
+
 @router.message(RuleUIState.button_url, F.text == "❌ Cancel")
 async def cancel_edit_button_url(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
 
 
 @router.message(RuleUIState.button_url, F.text)
@@ -481,9 +572,11 @@ async def get_button_url(message: types.Message, state: FSMContext):
         )
         return
 
+
     data = await state.get_data()
     rule_id = data.get("rule_id")
     label = data.get("button_text")
+
 
     async with session() as s:
         rule = await s.get(RepostRule, rule_id)
@@ -495,10 +588,13 @@ async def get_button_url(message: types.Message, state: FSMContext):
         rule.inline_button_url = url
         await s.commit()
 
+
     await state.clear()
     await message.answer(f"✅ Button set: [{label}] → {url}")
     text, kb = await _rule_detail_view(rule_id)
     await message.answer(text, reply_markup=kb)
+
+
 
 
 @router.callback_query(F.data.startswith("fwd:delbtn:"))
@@ -515,9 +611,12 @@ async def cb_remove_button(query: types.CallbackQuery):
     await query.message.edit_text(text, reply_markup=kb)
 
 
+
+
 # ---------------------------------------------------------------------------
 # Prefix text prepended to every post this rule forwards.
 # ---------------------------------------------------------------------------
+
 
 @router.callback_query(F.data.startswith("fwd:editprefix:"))
 async def cb_edit_prefix_start(query: types.CallbackQuery, state: FSMContext):
@@ -532,10 +631,14 @@ async def cb_edit_prefix_start(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
 
 
+
+
 @router.message(RuleUIState.prefix_text, F.text == "❌ Cancel")
 async def cancel_edit_prefix(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
+
+
 
 
 @router.message(RuleUIState.prefix_text, F.text)
@@ -544,6 +647,7 @@ async def get_prefix_text(message: types.Message, state: FSMContext):
     rule_id = data.get("rule_id")
     raw = message.text.strip()
     new_prefix = None if raw.lower() == "clear" else raw
+
 
     async with session() as s:
         rule = await s.get(RepostRule, rule_id)
@@ -554,10 +658,13 @@ async def get_prefix_text(message: types.Message, state: FSMContext):
         rule.prefix_text = new_prefix
         await s.commit()
 
+
     await state.clear()
     await message.answer("✅ Prefix cleared." if new_prefix is None else "✅ Prefix saved.")
     text, kb = await _rule_detail_view(rule_id)
     await message.answer(text, reply_markup=kb)
+
+
 
 
 @router.callback_query(F.data.startswith("fwd:delprefix:"))
@@ -573,9 +680,12 @@ async def cb_remove_prefix(query: types.CallbackQuery):
     await query.message.edit_text(text, reply_markup=kb)
 
 
+
+
 # ---------------------------------------------------------------------------
 # Link preview mode (Telegram's link_preview_options) for text posts.
 # ---------------------------------------------------------------------------
+
 
 _PREVIEW_MODES = [
     ("Telegram default", "default"),
@@ -584,6 +694,8 @@ _PREVIEW_MODES = [
     ("🔷 Large media", "large"),
     ("⬆️ Shown above text", "above"),
 ]
+
+
 
 
 @router.callback_query(F.data.startswith("fwd:previewmenu:"))
@@ -604,6 +716,8 @@ async def cb_preview_menu(query: types.CallbackQuery):
     await query.answer()
 
 
+
+
 @router.callback_query(F.data.startswith("fwd:setpreview:"))
 async def cb_set_preview(query: types.CallbackQuery):
     _, _, rule_id_s, mode = query.data.split(":")
@@ -620,9 +734,12 @@ async def cb_set_preview(query: types.CallbackQuery):
     await query.message.edit_text(text, reply_markup=kb)
 
 
+
+
 # ---------------------------------------------------------------------------
 # Backward-compatible text commands.
 # ---------------------------------------------------------------------------
+
 
 @router.message(Command("add_rule"))
 async def add_rule(message: types.Message, command: CommandObject):
@@ -655,6 +772,7 @@ async def add_rule(message: types.Message, command: CommandObject):
     if len(parts) == 4:
         caption_template = parts[3]
 
+
     async with session() as s:
         try:
             sid = int(source_key)
@@ -666,6 +784,7 @@ async def add_rule(message: types.Message, command: CommandObject):
         if not source:
             await message.reply("Source not found; add it with /add_source first")
             return
+
 
         try:
             dval = int(dest_key)
@@ -679,6 +798,7 @@ async def add_rule(message: types.Message, command: CommandObject):
             await message.reply("Destination channel not found; add it with /add_channel first")
             return
 
+
         rr = RepostRule(
             source_channel_id=source.id,
             destination_channel_id=dest.id,
@@ -689,6 +809,8 @@ async def add_rule(message: types.Message, command: CommandObject):
         s.add(rr)
         await s.commit()
     await message.reply(f"Added repost rule id={rr.id} source={source.identifier} -> dest={dest.chat_id}")
+
+
 
 
 @router.message(Command("list_rules"))
@@ -702,10 +824,13 @@ async def list_rules(message: types.Message):
         return
     lines = [
         f"ID={r.id} source_id={r.source_channel_id} dest_id={r.destination_channel_id} "
-        f"auto_delete={r.auto_delete_seconds} template={r.caption_template}"
+        f"auto_delete={r.auto_delete_seconds} template={r.caption_template} "
+        f"status={'Active' if r.enabled else 'PAUSED'}"
         for r in rows
     ]
     await message.reply("\n".join(lines))
+
+
 
 
 @router.message(Command("remove_rule"))
