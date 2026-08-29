@@ -12,7 +12,7 @@ from typing import Any
 
 from aiogram import Bot
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramEntityTooLarge
+from aiogram.exceptions import TelegramBadRequest, TelegramEntityTooLarge, TelegramForbiddenError
 from aiogram.types import (
     BufferedInputFile,
     InlineKeyboardButton,
@@ -25,11 +25,63 @@ from sqlalchemy import select
 from sqlalchemy import or_ as _sa_or  # noqa: F401 - kept for compatibility, unused after the identifier-matching fix below
 
 
+from config import get_settings
 from db import session
 from models import Channel, ContentType, Post, PostMediaItem, PostStatus, PostTarget, RepostRule, SourceChannel
 
 
 logger = logging.getLogger(__name__)
+
+
+
+
+_PERMANENT_REPOST_ERROR_MARKERS = (
+    "chat not found",
+    "bot was kicked",
+    "not enough rights",
+    "have no rights",
+    "user is deactivated",
+    "chat_admin_required",
+    "bot is not a member",
+)
+
+
+def _is_permanent_repost_failure(exc: Exception) -> bool:
+    """True for Telegram errors that will never succeed on retry - the bot
+    lost access to the destination (kicked, demoted, channel deleted) -
+    as opposed to transient network/rate-limit blips that are worth
+    retrying on the next source post. Distinguishing these matters
+    because a rule hitting a permanent failure used to be retried (and
+    silently fail) forever on every single new source post, with nothing
+    telling the operator the destination had gone dark."""
+    if isinstance(exc, TelegramForbiddenError):
+        return True
+    if isinstance(exc, TelegramBadRequest):
+        msg = str(exc).lower()
+        return any(marker in msg for marker in _PERMANENT_REPOST_ERROR_MARKERS)
+    return False
+
+
+async def _disable_broken_rule(s, bot: Bot, rule: RepostRule, dest: Channel, exc: Exception) -> None:
+    """Turn off a repost rule whose destination has become permanently
+    unreachable, and DM every operator so this does not just fail
+    silently forever - see _is_permanent_repost_failure."""
+    rule.enabled = False
+    await s.commit()
+    notify_text = (
+        "\u26a0\ufe0f REPOST RULE DISABLED\n\n"
+        f"Destination: {dest.title} (id={dest.id})\n"
+        f"Reason: {exc}\n\n"
+        "I turned this rule off automatically because Telegram says I can no "
+        "longer post there (kicked, demoted, or the channel is gone). "
+        "Re-add me as admin there if it should keep working, then re-enable "
+        "the rule with /list_rules."
+    )
+    for op_id in get_settings().allowed_user_id_set:
+        try:
+            await bot.send_message(op_id, notify_text)
+        except Exception:
+            pass
 
 
 
@@ -681,11 +733,13 @@ async def _repost_album(bot: Bot, items: list[dict], source: SourceChannel, rule
                 s.add(pt)
                 await s.commit()
                 continue
-            except Exception:
+            except Exception as exc:
                 logger.exception("Failed to repost album into channel %s", dest.title)
                 pt = PostTarget(post_id=post.id, channel_id=dest.id, message_id=None, sent_at=None)
                 s.add(pt)
                 await s.commit()
+                if _is_permanent_repost_failure(exc):
+                    await _disable_broken_rule(s, bot, rule, dest, exc)
                 continue
 
 
@@ -933,11 +987,13 @@ async def _repost_single(bot: Bot, message, source: SourceChannel, rules: list[R
                 s.add(pt)
                 await s.commit()
                 continue
-            except Exception:
+            except Exception as exc:
                 logger.exception("Failed to repost into channel %s", dest.title)
                 pt = PostTarget(post_id=post.id, channel_id=dest.id, message_id=None, sent_at=None)
                 s.add(pt)
                 await s.commit()
+                if _is_permanent_repost_failure(exc):
+                    await _disable_broken_rule(s, bot, rule, dest, exc)
                 continue
 
 
