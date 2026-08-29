@@ -58,6 +58,10 @@ async def run_scheduler_loop(bot: Bot) -> None:
                 ).options(selectinload(Post.targets).selectinload(PostTarget.channel))
                 res = await s.execute(q)
                 posts = res.scalars().all()
+                logger.info(
+                    "run_scheduler_loop: delete-branch now=%s matched %d due post(s): %s",
+                    now, len(posts), [(p.id, p.repeat_interval_seconds, p.delete_at) for p in posts],
+                )
                 for post in posts:
                     all_deleted = True
                     for target in post.targets:
@@ -69,6 +73,10 @@ async def run_scheduler_loop(bot: Bot) -> None:
                                 await bot.delete_message(chat_id=target.channel.chat_id, message_id=mid)
                             except Exception:
                                 all_deleted = False
+                                logger.exception(
+                                    "run_scheduler_loop: failed to delete message_id=%s from chat_id=%s for post_id=%s",
+                                    mid, target.channel.chat_id, post.id,
+                                )
                         target.message_id = None
                         target.extra_message_ids = None
                         target.sent_at = None
@@ -76,6 +84,10 @@ async def run_scheduler_loop(bot: Bot) -> None:
                         post.status = PostStatus.SCHEDULED
                         post.scheduled_time = now + timedelta(seconds=post.repeat_interval_seconds)
                         post.delete_at = None
+                        logger.info(
+                            "run_scheduler_loop: recycled post_id=%s back to SCHEDULED for %s (all_deleted=%s)",
+                            post.id, post.scheduled_time, all_deleted,
+                        )
                     elif all_deleted:
                         post.status = PostStatus.DELETED
 
@@ -88,7 +100,12 @@ async def run_scheduler_loop(bot: Bot) -> None:
                     Post.repeat_interval_seconds != None,
                 ).options(selectinload(Post.targets))
                 res2 = await s.execute(q2)
-                for post in res2.scalars().all():
+                _q2_posts = res2.scalars().all()
+                logger.info(
+                    "run_scheduler_loop: no-auto-delete recycle branch now=%s matched %d repeat-eligible post(s): %s",
+                    now, len(_q2_posts), [p.id for p in _q2_posts],
+                )
+                for post in _q2_posts:
                     sent_times = [t.sent_at for t in post.targets if t.sent_at]
                     if not sent_times:
                         continue
@@ -100,6 +117,10 @@ async def run_scheduler_loop(bot: Bot) -> None:
                             target.sent_at = None
                         post.status = PostStatus.SCHEDULED
                         post.scheduled_time = now
+                        logger.info(
+                            "run_scheduler_loop: recycled post_id=%s (no-auto-delete branch) back to SCHEDULED, last posted_at=%s",
+                            post.id, posted_at,
+                        )
 
                 await s.commit()
             await asyncio.sleep(30)
