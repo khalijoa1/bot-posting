@@ -46,6 +46,17 @@ async def run_scheduler_loop(bot: Bot) -> None:
         try:
             now = datetime.utcnow()
             async with session() as s:
+                _debug_recurring = await s.execute(
+                    select(Post).where(Post.repeat_interval_seconds != None)
+                )
+                logger.info(
+                    "run_scheduler_loop: ALL recurring posts (any status) now=%s: %s",
+                    now,
+                    [
+                        (p.id, p.status.value, p.repeat_interval_seconds, p.delete_at, p.scheduled_time)
+                        for p in _debug_recurring.scalars().all()
+                    ],
+                )
                 # selectinload both hops here - post.targets and each
                 # target.channel are touched below as plain attribute access,
                 # which (without eager loading) triggers an implicit lazy
