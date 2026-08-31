@@ -75,6 +75,15 @@ async def run_scheduler_loop(bot: Bot) -> None:
                 )
                 for post in posts:
                     all_deleted = True
+                    # Base the next occurrence on when this post was actually
+                    # last sent, not on whichever moment the 30s poll happens to
+                    # notice delete_at has passed - otherwise the visible gap
+                    # between posts silently becomes
+                    # auto_delete_seconds + repeat_interval_seconds instead of
+                    # just repeat_interval_seconds (target.sent_at gets cleared
+                    # below before recycling, so it must be captured first).
+                    _sent_times = [t.sent_at for t in post.targets if t.sent_at]
+                    posted_at = max(_sent_times) if _sent_times else now
                     for target in post.targets:
                         ids = _target_message_ids(target)
                         if not ids:
@@ -93,7 +102,8 @@ async def run_scheduler_loop(bot: Bot) -> None:
                         target.sent_at = None
                     if post.repeat_interval_seconds:
                         post.status = PostStatus.SCHEDULED
-                        post.scheduled_time = now + timedelta(seconds=post.repeat_interval_seconds)
+                        next_time = posted_at + timedelta(seconds=post.repeat_interval_seconds)
+                        post.scheduled_time = next_time if next_time > now else now
                         post.delete_at = None
                         logger.info(
                             "run_scheduler_loop: recycled post_id=%s back to SCHEDULED for %s (all_deleted=%s)",
