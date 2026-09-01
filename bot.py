@@ -41,6 +41,16 @@ async def main() -> None:
     await init_db()
 
     bot = Bot(token=settings_obj.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+
+    # TEMPORARY DIAGNOSTIC - verifying force-join membership check for
+    # https://t.me/sablenyaaaa now that the bot was just added as admin
+    # there. Remove this block right after confirming the result in logs.
+    try:
+        _test_member = await bot.get_chat_member(chat_id="@sablenyaaaa", user_id=8386313581)
+        logging.warning("TEMP DIAG: sablenyaaaa membership check for user 8386313581 -> status=%s", _test_member.status)
+    except Exception:
+        logging.exception("TEMP DIAG: sablenyaaaa membership check FAILED")
+
     dp = Dispatcher(storage=MemoryStorage())
 
     if settings_obj.dashboard_url:
