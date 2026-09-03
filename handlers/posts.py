@@ -38,7 +38,11 @@ async def list_posts(message: types.Message, user_id: int | None = None):
     """List all user's posts."""
     owner_id = user_id if user_id is not None else message.from_user.id
     async with session() as s:
-        q = select(Post).where(Post.owner_user_id == owner_id)
+        q = (
+            select(Post)
+            .where(Post.owner_user_id == owner_id, Post.status != PostStatus.DELETED)
+            .order_by(Post.id.desc())
+        )
         res = await s.execute(q)
         posts = res.scalars().all()
 
@@ -52,7 +56,8 @@ async def list_posts(message: types.Message, user_id: int | None = None):
         )
         return
 
-    text = "━━━━━━━━━━━━━━━━\n📋 MY POSTS\n━━━━━━━━━━━━━━━━━\n\n"
+    header = "━━━━━━━━━━━━━━━━\n📋 MY POSTS\n━━━━━━━━━━━━━━━━━\n\n"
+    chunks = [header]
 
     for p in posts:
         async with session() as s:
@@ -61,7 +66,7 @@ async def list_posts(message: types.Message, user_id: int | None = None):
             targets = tres.scalars().all()
 
         preview = (p.text or "")[:60]
-        text += (
+        entry = (
             f"━━━━━━━━━━━━━━━━━\n"
             f"ID: {p.id}\n"
             f"Text: {preview}{'...' if len(p.text or '') > 60 else ''}\n"
@@ -69,11 +74,21 @@ async def list_posts(message: types.Message, user_id: int | None = None):
             f"Status: {p.status.value}\n"
         )
         if p.repeat_interval_seconds:
-            text += f"🔁 Repeats every {format_duration(p.repeat_interval_seconds)}\n"
-        text += "\n"
+            entry += f"🔁 Repeats every {format_duration(p.repeat_interval_seconds)}\n"
+        entry += "\n"
 
-    await message.answer(text)
+        # Telegram caps messages at 4096 chars. With enough historical posts
+        # a single giant message blows past that and the send crashes with
+        # "message is too long" - the whole /myposts list silently fails and
+        # the user just sees nothing happen when they tap the button. Start
+        # a new chunk instead of appending once the current one would go
+        # over a safe limit.
+        if len(chunks[-1]) + len(entry) > 3500:
+            chunks.append("")
+        chunks[-1] += entry
 
+    for chunk in chunks:
+        await message.answer(chunk)
 
 @router.message(Command("edit"))
 async def edit_start(message: types.Message, state: FSMContext):
