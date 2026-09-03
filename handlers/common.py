@@ -41,6 +41,9 @@ def main_menu_kb() -> types.InlineKeyboardMarkup:
             types.InlineKeyboardButton(text="📊 Analytics", callback_data="menu:analytics"),
             types.InlineKeyboardButton(text="❓ Help", callback_data="menu:help"),
         ],
+        [
+            types.InlineKeyboardButton(text="📋 My Posts", callback_data="act:myposts"),
+        ],
     ]
     dashboard_url = get_settings().dashboard_url
     if dashboard_url:
