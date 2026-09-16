@@ -49,14 +49,16 @@ async def run_scheduler_loop(bot: Bot) -> None:
                 _debug_recurring = await s.execute(
                     select(Post).where(Post.repeat_interval_seconds != None)
                 )
-                logger.info(
-                    "run_scheduler_loop: ALL recurring posts (any status) now=%s: %s",
-                    now,
-                    [
-                        (p.id, p.status.value, p.repeat_interval_seconds, p.delete_at, p.scheduled_time)
-                        for p in _debug_recurring.scalars().all()
-                    ],
-                )
+                _recurring_rows = _debug_recurring.scalars().all()
+                if _recurring_rows:
+                    logger.info(
+                        "run_scheduler_loop: ALL recurring posts (any status) now=%s: %s",
+                        now,
+                        [
+                            (p.id, p.status.value, p.repeat_interval_seconds, p.delete_at, p.scheduled_time)
+                            for p in _recurring_rows
+                        ],
+                    )
                 # selectinload both hops here - post.targets and each
                 # target.channel are touched below as plain attribute access,
                 # which (without eager loading) triggers an implicit lazy
@@ -69,10 +71,11 @@ async def run_scheduler_loop(bot: Bot) -> None:
                 ).options(selectinload(Post.targets).selectinload(PostTarget.channel))
                 res = await s.execute(q)
                 posts = res.scalars().all()
-                logger.info(
-                    "run_scheduler_loop: delete-branch now=%s matched %d due post(s): %s",
-                    now, len(posts), [(p.id, p.repeat_interval_seconds, p.delete_at) for p in posts],
-                )
+                if posts:
+                    logger.info(
+                        "run_scheduler_loop: delete-branch now=%s matched %d due post(s): %s",
+                        now, len(posts), [(p.id, p.repeat_interval_seconds, p.delete_at) for p in posts],
+                    )
                 for post in posts:
                     all_deleted = True
                     # Base the next occurrence on when this post was actually
@@ -112,6 +115,21 @@ async def run_scheduler_loop(bot: Bot) -> None:
                     elif all_deleted:
                         post.status = PostStatus.DELETED
 
+                    # Commit after each post instead of batching every due
+                    # post into one long-held transaction - the loop body
+                    # above does a bot.delete_message() Telegram API call
+                    # per message, which can take a while under a burst of
+                    # many due posts at once, and this repo's single SQLite
+                    # file only tolerates one write lock at a time (see
+                    # db.py's WAL/busy_timeout comment). Committing per-post
+                    # bounds how long each write lock is held to roughly one
+                    # post's worth of network calls instead of the whole
+                    # batch, cutting the odds of a collision with
+                    # run_post_send_loop's own commits during a simultaneous
+                    # burst - this is what caused the multi-hour "database
+                    # is locked" storm seen in production on 2026-09-13.
+                    await s.commit()
+
                 # Repeating posts with no auto-delete never get a delete_at,
                 # so they'd never be touched above - recycle them here based
                 # on time-since-last-sent instead.
@@ -122,10 +140,11 @@ async def run_scheduler_loop(bot: Bot) -> None:
                 ).options(selectinload(Post.targets))
                 res2 = await s.execute(q2)
                 _q2_posts = res2.scalars().all()
-                logger.info(
-                    "run_scheduler_loop: no-auto-delete recycle branch now=%s matched %d repeat-eligible post(s): %s",
-                    now, len(_q2_posts), [p.id for p in _q2_posts],
-                )
+                if _q2_posts:
+                    logger.info(
+                        "run_scheduler_loop: no-auto-delete recycle branch now=%s matched %d repeat-eligible post(s): %s",
+                        now, len(_q2_posts), [p.id for p in _q2_posts],
+                    )
                 for post in _q2_posts:
                     sent_times = [t.sent_at for t in post.targets if t.sent_at]
                     if not sent_times:
@@ -203,19 +222,17 @@ async def run_post_send_loop(bot: Bot) -> None:
                 res = await s.execute(q)
                 posts = res.scalars().all()
 
-                # TEMPORARY DIAGNOSTIC: "nothing was sent" was reported for
-                # posts 474/483/489/922/925/991/1230 despite them showing
-                # status='scheduled' with a past scheduled_time in the DB -
-                # this logs the query's own view of `now` plus every post id
-                # + raw scheduled_time it actually matched, every single
-                # pass, so a query/type mismatch (vs. some other cause) is
-                # directly visible instead of inferred from absence of logs.
-                # Safe to remove once the real cause is confirmed.
-                logger.warning(
-                    "run_post_send_loop: now=%s matched %d post(s): %s | compiled_sql=%s",
-                    now, len(posts), [(p.id, p.scheduled_time) for p in posts],
-                    str(q.compile(compile_kwargs={"literal_binds": True})).replace("\n", " "),
-                )
+                # The diagnostic this replaced logged a full dump (including
+                # the recompiled SQL text) every 30 seconds forever, whether
+                # or not anything was actually due - it served its purpose
+                # confirming the original "nothing was sent" mismatch and is
+                # now scoped down to only fire when there's something to
+                # report, so idle cycles stop generating constant log noise.
+                if posts:
+                    logger.info(
+                        "run_post_send_loop: now=%s matched %d post(s): %s",
+                        now, len(posts), [(p.id, p.scheduled_time) for p in posts],
+                    )
 
                 for post in posts:
                     target_q = select(PostTarget).where(PostTarget.post_id == post.id).options(
@@ -324,6 +341,23 @@ async def run_post_send_loop(bot: Bot) -> None:
                     post.status = PostStatus.SENT
                     if post.auto_delete_seconds:
                         post.delete_at = now + timedelta(seconds=post.auto_delete_seconds)
+
+                    # Commit after each post rather than batching every due
+                    # post's sends into one long-held transaction - this loop
+                    # can make several sequential Telegram API calls per post
+                    # (one per target/channel), and a burst of many due posts
+                    # at once (e.g. several recurring posts firing in the
+                    # same 30s window) previously held a single write
+                    # transaction open for the whole batch. With one SQLite
+                    # file shared by this loop, run_scheduler_loop, and the
+                    # repost handler, that turned into multi-hour "database
+                    # is locked" storms during bursts (seen in production on
+                    # 2026-09-13) even with WAL mode + busy_timeout already
+                    # enabled (db.py) - the lock was simply held too long for
+                    # busy_timeout to help. Committing per-post bounds each
+                    # transaction to roughly one post's worth of network
+                    # calls instead of the whole batch.
+                    await s.commit()
                 await s.commit()
             await asyncio.sleep(30)
         except asyncio.CancelledError:
