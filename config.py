@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     # (services/dashboard.py). Empty means the dashboard has no auth check -
     # set this to something random in production so the URL alone isn't
     # enough to view channel/post data.
+    # Private channel that mirrors every post (backup + edit sync); 0 = off.
+    storage_channel_id: int = 0
+
     dashboard_token: str = ""
 
     # Full URL (including the ?key= token) of the dashboard - used to
