@@ -32,6 +32,7 @@ from services.stats import run_channel_stats_loop
 from services.telethon_client import run_userbot
 from services.recurring import run_recurring_messages_loop
 from services.dashboard import run_dashboard
+from services.storage_channel import run_storage_sync
 
 logging.basicConfig(level=logging.INFO)
 
@@ -94,6 +95,7 @@ async def main() -> None:
     asyncio.create_task(run_channel_stats_loop(bot))
     asyncio.create_task(run_recurring_messages_loop(bot))
     asyncio.create_task(run_dashboard())
+    asyncio.create_task(run_storage_sync(bot))
 
     try:
         await dp.start_polling(bot)
