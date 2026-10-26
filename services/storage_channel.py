@@ -220,7 +220,13 @@ async def _mirror_pass(bot: Bot, chat_id):
     async with session() as s:
         posts = (await s.execute(select(Post).order_by(Post.id))).scalars().all()
         jobs = []
+        stale = []
         for post in posts:
+            if not post.owner_user_id:
+                # reposted/system posts (owner 0) are not stored; clean up any earlier copy
+                if post.id in mapping:
+                    stale.append((post.id, mapping[post.id][0]))
+                continue
             meta, media = await _post_snapshot(s, post)
             fp = _fingerprint(post, meta, media)
             entry = mapping.get(post.id)
@@ -233,6 +239,15 @@ async def _mirror_pass(bot: Bot, chat_id):
             s.expunge(post)
             for m in media:
                 s.expunge(m)
+    for pid, mid in stale:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            logger.info("storage: could not delete old copy of post %s", pid)
+        async with session() as s2:
+            await s2.execute(text("DELETE FROM storage_map WHERE post_id = :p"), {"p": pid})
+            await s2.commit()
+        await asyncio.sleep(SEND_GAP_SECONDS)
     for post, meta, media, fp, mid in jobs:
         try:
             if mid is None:
