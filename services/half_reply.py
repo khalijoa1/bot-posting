@@ -32,6 +32,15 @@ async def _ensure_table():
         await s.execute(text(
             "CREATE TABLE IF NOT EXISTS half_reply_state (k TEXT PRIMARY KEY, v TEXT)"))
         await s.commit()
+    for ddl in ("ALTER TABLE half_reply ADD COLUMN chat_id INTEGER",
+                "ALTER TABLE half_reply ADD COLUMN reply_id INTEGER",
+                "ALTER TABLE half_reply ADD COLUMN done INTEGER DEFAULT 0"):
+        try:
+            async with session() as s2:
+                await s2.execute(text(ddl))
+                await s2.commit()
+        except Exception:
+            pass  # column already exists
 
 
 async def is_paused() -> bool:
@@ -62,7 +71,45 @@ async def _claim(target_id, cycle) -> bool:
     return True
 
 
+async def _set_reply(target_id, cycle, chat_id, reply_id):
+    async with session() as s:
+        await s.execute(
+            text("UPDATE half_reply SET chat_id = :c, reply_id = :r, done = 0 WHERE target_id = :t AND cycle = :y"),
+            {"c": chat_id, "r": reply_id, "t": target_id, "y": cycle})
+        await s.commit()
+
+
+async def _cleanup(bot: Bot):
+    """Delete the reply once its post is deleted (auto-delete time reached, or removed by hand)."""
+    now = datetime.utcnow()
+    async with session() as s:
+        rows = (await s.execute(text(
+            "SELECT h.target_id, h.cycle, h.chat_id, h.reply_id, p.status "
+            "FROM half_reply h LEFT JOIN post_targets t ON t.id = h.target_id "
+            "LEFT JOIN posts p ON p.id = t.post_id "
+            "WHERE h.reply_id IS NOT NULL AND COALESCE(h.done, 0) = 0"))).all()
+    for target_id, cycle, chat_id, reply_id, status in rows:
+        try:
+            due = now >= datetime.fromisoformat(cycle)
+        except Exception:
+            due = True
+        gone = status is None or str(status).upper() in ("DELETED", "CANCELED")
+        if not (due or gone):
+            continue
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=reply_id)
+            logger.info("half-reply: deleted reply %s in %s", reply_id, chat_id)
+        except Exception:
+            logger.info("half-reply: reply %s in %s was already gone or could not be deleted", reply_id, chat_id)
+        async with session() as s:
+            await s.execute(text("UPDATE half_reply SET done = 1 WHERE target_id = :t AND cycle = :y"),
+                            {"t": target_id, "y": cycle})
+            await s.commit()
+        await asyncio.sleep(1)
+
+
 async def _pass(bot: Bot):
+    await _cleanup(bot)
     if await is_paused():
         return
     now = datetime.utcnow()
@@ -91,9 +138,10 @@ async def _pass(bot: Bot):
         try:
             if not await _claim(target_id, cycle):
                 continue
-            await bot.send_message(
+            sent = await bot.send_message(
                 chat_id=chat_id, text=REPLY_TEXT,
                 reply_to_message_id=message_id, allow_sending_without_reply=True)
+            await _set_reply(target_id, cycle, chat_id, sent.message_id)
             logger.info("half-reply: replied in %s to message %s", chat_id, message_id)
         except Exception:
             logger.exception("half-reply: could not reply in %s", chat_id)
