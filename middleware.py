@@ -83,6 +83,15 @@ class AllowlistMiddleware(BaseMiddleware):
                     return await handler(event, data)
                 if text.strip().split(" ", 1)[:1] == ["/add_group"]:
                     return await handler(event, data)
+                if msg.chat.type == "private" and text.startswith("/start f_"):
+                    return await handler(event, data)
+                if msg.chat.type == "private" and text and not text.startswith("/"):
+                    try:
+                        from services.file_share import keyword_code
+                        if await keyword_code(text):
+                            return await handler(event, data)
+                    except Exception:
+                        pass
             elif event.callback_query:
                 user = event.callback_query.from_user
 
