@@ -476,7 +476,8 @@ async def set_repeat(message: types.Message):
             if post.status not in (PostStatus.SENT, PostStatus.SCHEDULED):
                 post.status = PostStatus.SCHEDULED
                 post.scheduled_time = datetime.utcnow() + timedelta(seconds=30)
-            lines.append(f"{pid}: repeats every {format_duration(secs)} (status {post.status.value})")
+            _ad = post.auto_delete_seconds
+            lines.append(f"{pid}: repeats every {format_duration(secs)}, auto-delete " + (f"after {format_duration(_ad)}" if _ad else "NOT SET - use /autodelete " + str(pid) + " 7h") + f" (status {post.status.value})")
         await s.commit()
     await message.answer("\n".join(lines))
 
@@ -506,5 +507,39 @@ async def pause_repeat(message: types.Message):
             if post.status == PostStatus.SCHEDULED:
                 post.status = PostStatus.CANCELED
             lines.append(f"{pid}: paused (use /repeat {pid} 6h to loop again)")
+        await s.commit()
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("autodelete"))
+async def set_autodelete(message: types.Message):
+    """/autodelete <id> <6h|30m|1d> [<id> <time> ...] - set how long after
+    each send the post is deleted from the channels (0 = never)."""
+    from datetime import datetime, timedelta
+    parts = (message.text or "").split()[1:]
+    if len(parts) < 2 or len(parts) % 2:
+        await message.answer("Usage: /autodelete 17271 7h 17272 4h (units: m, h, d; 0 = never)")
+        return
+    lines = []
+    async with session() as s:
+        for i in range(0, len(parts), 2):
+            pid_s, tm = parts[i], parts[i + 1].lower()
+            try:
+                pid = int(pid_s)
+                secs = 0 if tm == "0" else int(float(tm[:-1]) * {"m": 60, "h": 3600, "d": 86400}[tm[-1]])
+            except Exception:
+                lines.append(f"{pid_s}: bad value {tm}")
+                continue
+            post = await s.get(Post, pid)
+            if not post or post.owner_user_id != message.from_user.id:
+                lines.append(f"{pid}: not found or not yours")
+                continue
+            post.auto_delete_seconds = secs or None
+            if post.status == PostStatus.SENT:
+                tq = select(PostTarget).where(PostTarget.post_id == pid)
+                sent = [t.sent_at for t in (await s.execute(tq)).scalars().all() if t.sent_at]
+                base = max(sent) if sent else datetime.utcnow()
+                post.delete_at = (base + timedelta(seconds=secs)) if secs else None
+            lines.append(f"{pid}: auto-delete " + (f"{format_duration(secs)} after each send" if secs else "off"))
         await s.commit()
     await message.answer("\n".join(lines))
