@@ -445,3 +445,37 @@ async def edit_button(message: types.Message, state: FSMContext):
 async def delete_button(message: types.Message, state: FSMContext):
     """Delete from menu."""
     await delete_start(message, state)
+
+
+@router.message(Command("repeat"))
+async def set_repeat(message: types.Message):
+    """/repeat <id> <6h|30m|1d> [<id> <time> ...] - (re)apply a repeat
+    interval to your own posts and put them back in the send queue."""
+    from datetime import datetime, timedelta
+    parts = (message.text or "").split()[1:]
+    if len(parts) < 2 or len(parts) % 2:
+        await message.answer("Usage: /repeat 17271 6h 17272 5h (units: m, h, d)")
+        return
+    lines = []
+    async with session() as s:
+        for i in range(0, len(parts), 2):
+            pid_s, tm = parts[i], parts[i + 1].lower()
+            try:
+                pid = int(pid_s)
+                mult = {"m": 60, "h": 3600, "d": 86400}[tm[-1]]
+                secs = int(float(tm[:-1]) * mult)
+                assert secs >= 60
+            except Exception:
+                lines.append(f"{pid_s}: bad value {tm}")
+                continue
+            post = await s.get(Post, pid)
+            if not post or post.owner_user_id != message.from_user.id:
+                lines.append(f"{pid}: not found or not yours")
+                continue
+            post.repeat_interval_seconds = secs
+            if post.status not in (PostStatus.SENT, PostStatus.SCHEDULED):
+                post.status = PostStatus.SCHEDULED
+                post.scheduled_time = datetime.utcnow() + timedelta(seconds=30)
+            lines.append(f"{pid}: repeats every {format_duration(secs)} (status {post.status.value})")
+        await s.commit()
+    await message.answer("\n".join(lines))
