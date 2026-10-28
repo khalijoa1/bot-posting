@@ -33,6 +33,8 @@ from services.telethon_client import run_userbot
 from services.recurring import run_recurring_messages_loop
 from services.dashboard import run_dashboard
 from services.storage_channel import run_storage_sync
+from services import half_reply
+from services.half_reply import run_half_reply_loop
 
 logging.basicConfig(level=logging.INFO)
 
@@ -58,6 +60,7 @@ async def main() -> None:
     dp.update.outer_middleware(AllowlistMiddleware())
 
     # Include all handlers in proper order
+    dp.include_router(half_reply.router)
     dp.include_router(menu.router)
     dp.include_router(compose.router)
     dp.include_router(bulkpost.router)
@@ -96,6 +99,7 @@ async def main() -> None:
     asyncio.create_task(run_recurring_messages_loop(bot))
     asyncio.create_task(run_dashboard())
     asyncio.create_task(run_storage_sync(bot))
+    asyncio.create_task(run_half_reply_loop(bot))
 
     try:
         await dp.start_polling(bot)
