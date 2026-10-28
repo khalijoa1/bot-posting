@@ -34,6 +34,7 @@ from services.recurring import run_recurring_messages_loop
 from services.dashboard import run_dashboard
 from services.storage_channel import run_storage_sync
 from services import half_reply
+from services import file_share
 from services.half_reply import run_half_reply_loop
 
 logging.basicConfig(level=logging.INFO)
@@ -61,6 +62,7 @@ async def main() -> None:
 
     # Include all handlers in proper order
     dp.include_router(half_reply.router)
+    dp.include_router(file_share.router)
     dp.include_router(menu.router)
     dp.include_router(compose.router)
     dp.include_router(bulkpost.router)
