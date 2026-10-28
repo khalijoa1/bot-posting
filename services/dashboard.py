@@ -144,7 +144,9 @@ async def run_dashboard() -> None:
     """
     port = int(os.environ.get("PORT", 8080))
     app = web.Application()
-    app.router.add_get("/", _handle_dashboard)
+    app.router.add_get("/old", _handle_dashboard)
+    from services.dashboard_app import register
+    register(app)
 
     runner = web.AppRunner(app)
     await runner.setup()
