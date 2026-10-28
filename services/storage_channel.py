@@ -147,6 +147,8 @@ def _fingerprint(post, meta, media):
 
 
 def _wanted(post):
+    if not post.owner_user_id:
+        return False  # only posts you compose, never reposts
     status = post.status
     if status in (PostStatus.DRAFT, PostStatus.SCHEDULED):
         return True
@@ -230,6 +232,8 @@ async def _mirror_pass(bot: Bot, chat_id):
         posts = (await s.execute(select(Post).order_by(Post.id))).scalars().all()
         todo = []
         for post in posts:
+            if not post.owner_user_id:
+                continue  # reposts (owner 0) are never mirrored - only posts you compose
             meta, media = await _post_snapshot(s, post)
             fp = _fingerprint(post, meta, media)
             entry = mapping.get(post.id)
