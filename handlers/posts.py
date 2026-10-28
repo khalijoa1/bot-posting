@@ -479,3 +479,32 @@ async def set_repeat(message: types.Message):
             lines.append(f"{pid}: repeats every {format_duration(secs)} (status {post.status.value})")
         await s.commit()
     await message.answer("\n".join(lines))
+
+
+@router.message(Command("pause"))
+async def pause_repeat(message: types.Message):
+    """/pause <id> [<id> ...] - stop a post repeating. Its current copy in
+    the channels stays until its auto-delete. Use /repeat <id> <time> to
+    start the loop again."""
+    ids = []
+    for p in (message.text or "").split()[1:]:
+        try:
+            ids.append(int(p))
+        except ValueError:
+            pass
+    if not ids:
+        await message.answer("Usage: /pause 17271 17272")
+        return
+    lines = []
+    async with session() as s:
+        for pid in ids:
+            post = await s.get(Post, pid)
+            if not post or post.owner_user_id != message.from_user.id:
+                lines.append(f"{pid}: not found or not yours")
+                continue
+            post.repeat_interval_seconds = None
+            if post.status == PostStatus.SCHEDULED:
+                post.status = PostStatus.CANCELED
+            lines.append(f"{pid}: paused (use /repeat {pid} 6h to loop again)")
+        await s.commit()
+    await message.answer("\n".join(lines))
