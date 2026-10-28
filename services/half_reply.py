@@ -9,7 +9,7 @@ import asyncio
 import logging
 from datetime import datetime
 
-from aiogram import Bot, Router, types
+from aiogram import Bot, F, Router, types
 from aiogram.filters import Command
 from sqlalchemy import select, text
 
@@ -178,3 +178,24 @@ async def cmd_resume(message: types.Message):
 async def cmd_status(message: types.Message):
     state = "PAUSED \u23F8" if await is_paused() else "ON \u25B6\uFE0F"
     await message.answer(f"Half-time reply (\"{REPLY_TEXT}\"): {state}\n/reply_pause \u00b7 /reply_resume")
+
+
+async def toggle_button() -> types.InlineKeyboardButton:
+    """Inline button for the Messaging menu: pauses/resumes the half-time reply."""
+    paused = await is_paused()
+    label = "\u25B6\uFE0F Resume \"YOU WERE MENTIONED\" reply" if paused else "\u23F8 Pause \"YOU WERE MENTIONED\" reply"
+    return types.InlineKeyboardButton(text=label, callback_data="hr:toggle")
+
+
+@router.callback_query(F.data == "hr:toggle")
+async def cb_toggle(query: types.CallbackQuery):
+    now_paused = not await is_paused()
+    await set_paused(now_paused)
+    try:
+        rows = []
+        for row in query.message.reply_markup.inline_keyboard:
+            rows.append([(await toggle_button()) if b.callback_data == "hr:toggle" else b for b in row])
+        await query.message.edit_reply_markup(reply_markup=types.InlineKeyboardMarkup(inline_keyboard=rows))
+    except Exception:
+        logger.exception("half-reply: could not refresh the button")
+    await query.answer("Reply paused" if now_paused else "Reply resumed")
