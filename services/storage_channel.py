@@ -39,12 +39,11 @@ _HEADER_RE = re.compile(r"^#P(\d+)\b")
 _MARK = "⚙"                # gear: starts the hidden metadata footer line
 
 
+# --------------------------------------------------------------------------
+# rendering / parsing (pure functions)
+# --------------------------------------------------------------------------
 def _iso(dt):
     return dt.isoformat() if dt else None
-
-
-def _u16(s):
-    return len(s.encode("utf-16-le")) // 2
 
 
 def build_message(post, meta, limit):
@@ -55,13 +54,11 @@ def build_message(post, meta, limit):
     header = f"#P{post.id} · {status.upper()} · {ctype}\n\U0001F552 {when}"
     footer = f"{_MARK} <code>{html_lib.escape(json.dumps(meta, separators=(',', ':')), quote=False)}</code>"
     body = post.text or ""
+    room = limit - len(header) - len(footer) - 6
     truncated = False
-    # Telegram counts UTF-16 units (an emoji is 2), so measure that way and shrink until it fits
-    while body and _u16(header) + _u16(body) + _u16(footer) + 16 > limit:
-        body = body[: int(len(body) * 0.9) - 1]
+    if len(body) > room:
+        body = body[: max(room - 12, 0)] + " …[cut]"
         truncated = True
-    if truncated:
-        body = body + " …[cut]"
     meta["trunc"] = 1 if truncated else 0
     if truncated:
         footer = f"{_MARK} <code>{html_lib.escape(json.dumps(meta, separators=(',', ':')), quote=False)}</code>"
@@ -93,6 +90,9 @@ def parse_message(raw_text, html_text):
     return post_id, body.strip("\n").strip(), meta
 
 
+# --------------------------------------------------------------------------
+# DB helpers
+# --------------------------------------------------------------------------
 async def _ensure_table():
     async with session() as s:
         await s.execute(text(
@@ -163,6 +163,9 @@ def _wanted(post):
     return False  # canceled / deleted: only refreshed if already mirrored
 
 
+# --------------------------------------------------------------------------
+# bot -> channel (mirror)
+# --------------------------------------------------------------------------
 async def _send_mirror(bot: Bot, chat_id, post, meta, media):
     ctype = post.content_type
     limit = TEXT_LIMIT if ctype == ContentType.TEXT else CAPTION_LIMIT
@@ -225,35 +228,23 @@ async def _mirror_pass(bot: Bot, chat_id):
     mapping = await _load_map()
     async with session() as s:
         posts = (await s.execute(select(Post).order_by(Post.id))).scalars().all()
-        jobs = []
-        stale = []
+        todo = []
         for post in posts:
-            if not post.owner_user_id:
-                # reposted/system posts (owner 0) are not stored; clean up any earlier copy
-                if post.id in mapping:
-                    stale.append((post.id, mapping[post.id][0]))
-                continue
             meta, media = await _post_snapshot(s, post)
             fp = _fingerprint(post, meta, media)
             entry = mapping.get(post.id)
             if entry is None:
                 if _wanted(post):
-                    jobs.append((post, meta, media, fp, None))
+                    todo.append((post, meta, media, fp, None))
             elif entry[1] != fp:
-                jobs.append((post, meta, media, fp, entry[0]))
-        for post, meta, media, fp, mid in jobs:
+                todo.append((post, meta, media, fp, entry[0]))
+        # detach data we need before the session closes
+        jobs = []
+        for post, meta, media, fp, mid in todo:
             s.expunge(post)
             for m in media:
                 s.expunge(m)
-    for pid, mid in stale:
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=mid)
-        except Exception:
-            logger.info("storage: could not delete old copy of post %s", pid)
-        async with session() as s2:
-            await s2.execute(text("DELETE FROM storage_map WHERE post_id = :p"), {"p": pid})
-            await s2.commit()
-        await asyncio.sleep(SEND_GAP_SECONDS)
+            jobs.append((post, meta, media, fp, mid))
     for post, meta, media, fp, mid in jobs:
         try:
             if mid is None:
@@ -268,6 +259,9 @@ async def _mirror_pass(bot: Bot, chat_id):
         await asyncio.sleep(SEND_GAP_SECONDS)
 
 
+# --------------------------------------------------------------------------
+# channel -> bot (edit sync) and restore, via the Telethon userbot
+# --------------------------------------------------------------------------
 async def _get_client(timeout=120):
     from services import telethon_client as tc
     waited = 0
@@ -307,13 +301,25 @@ async def _on_edit(event):
         logger.exception("storage: edit sync failed")
 
 
-async def _restore(bot: Bot, client, chat_id):
-    """Rebuild posts/channels from the storage channel when the DB has none."""
+async def _restore(bot: Bot, client, chat_id, merge=False):
+    """Rebuild posts/channels from the storage channel when the DB has none.
+
+    merge=True (the /restore_recurring command): only re-create RECURRING posts that are
+    in the storage channel but missing from the database, and queue them to resume
+    posting (scheduled shortly from now, staggered) with their original repeat interval,
+    auto-delete time, button and target channels.
+    """
+    existing = set()
     async with session() as s:
         count = (await s.execute(select(func.count(Post.id)))).scalar() or 0
-    if count:
-        return
-    logger.warning("storage: database has no posts - restoring from the storage channel")
+        if merge:
+            existing = {r[0] for r in (await s.execute(select(Post.id))).all()}
+    if count and not merge:
+        return 0
+    if merge:
+        logger.warning("storage: restoring missing recurring posts from the storage channel")
+    else:
+        logger.warning("storage: database has no posts - restoring from the storage channel")
     settings = get_settings()
     default_owner = int(str(settings.allowed_user_ids).split(",")[0].strip() or 0)
     restored = 0
@@ -326,10 +332,17 @@ async def _restore(bot: Bot, client, chat_id):
         if post_id in seen:
             continue
         seen[post_id] = True
+        if merge and (post_id in existing or not meta.get("rp")):
+            continue
         try:
             header = (msg.raw_text or "").split("\n")[0]
             parts = [p.strip() for p in header.split("·")]
             status = PostStatus(parts[1].lower()) if len(parts) > 1 else PostStatus.DRAFT
+            if merge:
+                status = PostStatus.SCHEDULED
+                meta = dict(meta)
+                meta["st"] = (datetime.utcnow() + timedelta(seconds=60 + 20 * restored)).isoformat()
+                meta["da"] = None
             ctype = ContentType(parts[2].lower()) if len(parts) > 2 else ContentType.TEXT
             owner = meta.get("o") or default_owner
             photo_id = video_id = None
@@ -387,6 +400,44 @@ async def _restore(bot: Bot, client, chat_id):
         except Exception:
             logger.exception("storage: could not restore post %s", post_id)
     logger.warning("storage: restored %s posts from the storage channel", restored)
+    return restored
+
+
+async def _restore_cmd(message, bot: Bot):
+    """/restore_recurring - bring back recurring posts saved in the storage channel."""
+    chat_id = int(getattr(get_settings(), "storage_channel_id", 0) or 0)
+    if not chat_id:
+        await message.answer("The storage channel is not set up (STORAGE_CHANNEL_ID).")
+        return
+    client = await _get_client(timeout=20)
+    if client is None:
+        await message.answer("The userbot is not connected, so I cannot read the storage channel right now.")
+        return
+    await message.answer("Looking for recurring posts in the storage channel...")
+    try:
+        n = await _restore(bot, client, chat_id, merge=True)
+    except Exception:
+        logger.exception("storage: /restore_recurring failed")
+        await message.answer("Restore failed - see the logs.")
+        return
+    if n:
+        await message.answer(
+            f"Restored {n} recurring post(s). They will start posting within a few minutes, "
+            "with the same repeat time, auto-delete and channels as before.")
+    else:
+        await message.answer("No missing recurring posts found in the storage channel.")
+
+
+def _register_commands():
+    try:
+        from aiogram.filters import Command
+        from services import half_reply
+        half_reply.router.message.register(_restore_cmd, Command("restore_recurring"))
+    except Exception:
+        logger.exception("storage: could not register /restore_recurring")
+
+
+_register_commands()
 
 
 async def run_storage_sync(bot: Bot) -> None:
