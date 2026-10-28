@@ -543,3 +543,17 @@ async def set_autodelete(message: types.Message):
             lines.append(f"{pid}: auto-delete " + (f"{format_duration(secs)} after each send" if secs else "off"))
         await s.commit()
     await message.answer("\n".join(lines))
+
+
+# Tripwire: log (with a stack trace) whenever anything clears a post's
+# repeat setting, so an unexplained loss can be traced to its cause.
+import logging as _logging
+from sqlalchemy import event as _event
+
+_rlog = _logging.getLogger("repeat-watch")
+
+
+@_event.listens_for(Post.repeat_interval_seconds, "set")
+def _watch_repeat(target, value, oldvalue, initiator):
+    if value is None and oldvalue:
+        _rlog.warning("REPEAT CLEARED post=%s old=%s", target.id, oldvalue, stack_info=True)
