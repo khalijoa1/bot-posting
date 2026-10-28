@@ -46,19 +46,33 @@ def _iso(dt):
     return dt.isoformat() if dt else None
 
 
+def _u16(s):
+    return len(s.encode("utf-16-le")) // 2
+
+
 def build_message(post, meta, limit):
     """Return (message_html, truncated)."""
     status = getattr(post.status, "value", str(post.status))
     ctype = getattr(post.content_type, "value", str(post.content_type))
     when = post.scheduled_time.strftime("%Y-%m-%d %H:%M") if post.scheduled_time else "-"
     header = f"#P{post.id} · {status.upper()} · {ctype}\n\U0001F552 {when}"
-    footer = f"{_MARK} <code>{html_lib.escape(json.dumps(meta, separators=(',', ':')), quote=False)}</code>"
+
+    def _footer():
+        return f"{_MARK} <code>{html_lib.escape(json.dumps(meta, separators=(',', ':')), quote=False)}</code>"
+
+    footer = _footer()
+    # Many target channels can make the settings line alone too long: keep only their ids.
+    if _u16(header) + _u16(footer) + 200 > limit and meta.get("ch"):
+        meta["ch"] = [[c, ""] for c, _t in meta["ch"]]
+        footer = _footer()
     body = post.text or ""
-    room = limit - len(header) - len(footer) - 6
     truncated = False
-    if len(body) > room:
-        body = body[: max(room - 12, 0)] + " …[cut]"
+    # Telegram counts UTF-16 units (an emoji is 2), so measure that way and shrink until it fits
+    while body and _u16(header) + _u16(body) + _u16(footer) + 16 > limit:
+        body = body[: int(len(body) * 0.9) - 1]
         truncated = True
+    if truncated:
+        body = body + " …[cut]"
     meta["trunc"] = 1 if truncated else 0
     if truncated:
         footer = f"{_MARK} <code>{html_lib.escape(json.dumps(meta, separators=(',', ':')), quote=False)}</code>"
