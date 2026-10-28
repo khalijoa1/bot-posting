@@ -44,6 +44,7 @@ def main_menu_kb() -> types.InlineKeyboardMarkup:
         [
             types.InlineKeyboardButton(text="📋 My Posts", callback_data="act:myposts"),
         ],
+        [types.InlineKeyboardButton(text="📁 File Sharing", callback_data="fs:root")],
     ]
     dashboard_url = get_settings().dashboard_url
     if dashboard_url:
