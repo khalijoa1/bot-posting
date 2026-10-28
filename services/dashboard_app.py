@@ -133,7 +133,7 @@ def compute(now, channels, snaps, posts, targets, audience, counts, extras):
         d7 = _delta(series, now, 7)
         rows.append({
             "id": cid, "title": ch["title"], "members": members,
-            "d1": _delta(series, now, 1), "d7": d7, "d30": _delta(series, now, 30),
+            "h1": _delta(series, now, 1 / 24), "d1": _delta(series, now, 1), "d7": d7, "d30": _delta(series, now, 30),
             "g7": round(100.0 * d7 / (members - d7), 2) if (members and d7 is not None and members - d7 > 0) else None,
             "posts": 0, "posts30": 0, "auto_approve": bool(ch["auto_approve"]),
             "daily": d, "net14": [v for v in net[-14:]],
@@ -154,6 +154,7 @@ def compute(now, channels, snaps, posts, targets, audience, counts, extras):
     for cid, v in by_channel.items():
         all_series.extend(v)
     # combined series for deltas: sum of per-channel deltas (avoids jumps when a channel is added)
+    h1 = sum(r["h1"] or 0 for r in rows) if any(r["h1"] is not None for r in rows) else None
     d1 = sum(r["d1"] or 0 for r in rows) if any(r["d1"] is not None for r in rows) else None
     d7 = sum(r["d7"] or 0 for r in rows) if any(r["d7"] is not None for r in rows) else None
     d30 = sum(r["d30"] or 0 for r in rows) if any(r["d30"] is not None for r in rows) else None
@@ -222,7 +223,7 @@ def compute(now, channels, snaps, posts, targets, audience, counts, extras):
     return {
         "generated": now.isoformat() + "Z",
         "summary": {
-            "channels": len(channels), "members": members_now, "d1": d1, "d7": d7, "d30": d30,
+            "channels": len(channels), "members": members_now, "h1": h1, "d1": d1, "d7": d7, "d30": d30,
             "g7": round(100.0 * d7 / (members_now - d7), 2) if (d7 is not None and members_now - d7 > 0) else None,
             "avg_daily": avg_daily,
             "projection30": round(avg_daily * 30) if avg_daily is not None else None,
@@ -445,7 +446,7 @@ function cut(arr){return range===0?arr:arr.slice(-range);}
 function render(){
   var d=DATA,s=d.summary,h='',ef=d.effect,au=d.audience,a=d.automation,sh=d.shares||{};
   h+='<div class="hero"><div class="k">Total members across '+s.channels+' channels</div><div class="big" id="big">0</div><div class="chips" style="margin-top:8px">'+
-   '<div class="chip">24 hours<b>'+sg(s.d1)+'</b></div><div class="chip">7 days<b>'+sg(s.d7)+'</b></div><div class="chip">30 days<b>'+sg(s.d30)+'</b></div>'+
+   '<div class="chip">1 hour<b>'+sg(s.h1)+'</b></div><div class="chip">24 hours<b>'+sg(s.d1)+'</b></div><div class="chip">7 days<b>'+sg(s.d7)+'</b></div><div class="chip">30 days<b>'+sg(s.d30)+'</b></div>'+
    '<div class="chip">7-day growth<b>'+(s.g7==null?'-':sg(s.g7)+'%')+'</b></div><div class="chip">Avg / day<b>'+(s.avg_daily==null?'-':sg(s.avg_daily))+'</b></div><div class="chip">30-day projection<b>'+(s.projection30==null?'-':sg(s.projection30))+'</b></div></div></div>';
   h+='<div class="grid">'+
    '<div class="card"><div class="k">Posts today</div><div class="v">'+fm(s.posts_today)+'</div><div class="d mut">'+s.avg_posts_per_day_30+' / day (30d)</div></div>'+
@@ -482,7 +483,7 @@ function render(){
   var tot=s.members||1;
   rows.forEach(function(c){
     h+='<div class="card ch"><div class="row"><div class="name">'+esc(c.title)+'</div><div style="font-weight:800;font-size:16px">'+fm(c.members)+'</div></div>'+
-     '<div><span class="pill">24h '+sg(c.d1)+'</span><span class="pill">7d '+sg(c.d7)+(c.g7!=null?' ('+c.g7+'%)':'')+'</span><span class="pill">30d '+sg(c.d30)+'</span><span class="pill">posts '+fm(c.posts)+' &middot; '+fm(c.posts30)+' in 30d</span><span class="pill">'+pc(c.members||0,tot)+' of members</span>'+(c.auto_approve?'<span class="pill">auto-approve</span>':'')+'</div>'+
+     '<div><span class="pill">1h '+sg(c.h1)+'</span><span class="pill">24h '+sg(c.d1)+'</span><span class="pill">7d '+sg(c.d7)+(c.g7!=null?' ('+c.g7+'%)':'')+'</span><span class="pill">30d '+sg(c.d30)+'</span><span class="pill">posts '+fm(c.posts)+' &middot; '+fm(c.posts30)+' in 30d</span><span class="pill">'+pc(c.members||0,tot)+' of members</span>'+(c.auto_approve?'<span class="pill">auto-approve</span>':'')+'</div>'+
      '<div style="margin-top:8px">'+spark(cut(c.daily),'#2ee59d',58)+'</div></div>';
   });
   document.getElementById('root').innerHTML=h;
