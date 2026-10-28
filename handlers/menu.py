@@ -198,9 +198,20 @@ async def nav_main(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
 
 
+async def _messaging_kb() -> types.InlineKeyboardMarkup:
+    """Messaging menu + a Pause/Resume button for the "YOU WERE MENTIONED" half-time reply."""
+    try:
+        from services.half_reply import toggle_button
+        rows = [list(r) for r in MESSAGING_KB.inline_keyboard]
+        rows.insert(max(len(rows) - 1, 0), [await toggle_button()])
+        return types.InlineKeyboardMarkup(inline_keyboard=rows)
+    except Exception:
+        return MESSAGING_KB
+
+
 @router.callback_query(F.data == "menu:messaging")
 async def nav_messaging(query: types.CallbackQuery):
-    await query.message.edit_text(MESSAGING_TEXT, reply_markup=MESSAGING_KB)
+    await query.message.edit_text(MESSAGING_TEXT, reply_markup=await _messaging_kb())
     await query.answer()
 
 
