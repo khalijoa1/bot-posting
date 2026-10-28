@@ -19,7 +19,7 @@ from models import Channel, ChannelStatSnapshot
 logger = logging.getLogger(__name__)
 
 # How often to take a fresh snapshot of every channel's member count.
-SNAPSHOT_INTERVAL_SECONDS = 6 * 3600  # every 6 hours
+SNAPSHOT_INTERVAL_SECONDS = 3600  # every hour (sharper growth charts)
 
 
 async def _snapshot_all_channels(bot: Bot) -> None:
