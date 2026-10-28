@@ -1,3 +1,4 @@
+import html as _html
 """Post management - view, edit, delete."""
 import json
 
@@ -69,7 +70,7 @@ async def list_posts(message: types.Message, user_id: int | None = None):
         entry = (
             f"━━━━━━━━━━━━━━━━━\n"
             f"ID: {p.id}\n"
-            f"Text: {preview}{'...' if len(p.text or '') > 60 else ''}\n"
+            f"Text: {_html.escape(preview)}{'...' if len(p.text or '') > 60 else ''}\n"
             f"Channels: {len(targets)}\n"
             f"Status: {p.status.value}\n"
         )
