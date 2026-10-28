@@ -428,11 +428,19 @@ async def _restore_cmd(message, bot: Bot):
         await message.answer("No missing recurring posts found in the storage channel.")
 
 
+_RESTORE_RE = re.compile(r"^\W*/?\s*restore[_ ]?recurring\b", re.IGNORECASE)
+
+
+def _is_restore_text(message) -> bool:
+    """Match /restore_recurring however it was typed (backticks, dots, @botname, 'restore recurring')."""
+    return bool(_RESTORE_RE.match(getattr(message, "text", None) or ""))
+
+
 def _register_commands():
     try:
-        from aiogram.filters import Command
         from services import half_reply
-        half_reply.router.message.register(_restore_cmd, Command("restore_recurring"))
+        half_reply.router.message.register(_restore_cmd, _is_restore_text)
+        logger.info("storage: /restore_recurring command registered")
     except Exception:
         logger.exception("storage: could not register /restore_recurring")
 
