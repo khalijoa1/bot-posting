@@ -403,6 +403,35 @@ async def _restore(bot: Bot, client, chat_id, merge=False):
     return restored
 
 
+async def _ensure_entity(bot: Bot, client, chat_id) -> bool:
+    """Make sure the userbot can see the storage channel.
+
+    The userbot account must be a member of the channel. If Telethon does not know the
+    channel yet, have the bot (channel admin) make a one-use invite link and let the
+    userbot join with it, then refresh the userbot's dialog cache.
+    """
+    try:
+        await client.get_input_entity(chat_id)
+        return True
+    except Exception:
+        pass
+    try:
+        from telethon.tl.functions.messages import ImportChatInviteRequest
+        link = await bot.create_chat_invite_link(chat_id, name="userbot", member_limit=1)
+        invite_hash = link.invite_link.rstrip("/").split("/")[-1].lstrip("+")
+        await client(ImportChatInviteRequest(invite_hash))
+        logger.info("storage: userbot joined the storage channel via invite link")
+    except Exception as exc:  # already a member, or the bot cannot create invite links
+        logger.warning("storage: could not add the userbot to the storage channel: %r", exc)
+    try:
+        await client.get_dialogs()
+        await client.get_input_entity(chat_id)
+        return True
+    except Exception:
+        logger.exception("storage: userbot still cannot see the storage channel")
+        return False
+
+
 async def _restore_cmd(message, bot: Bot):
     """/restore_recurring - bring back recurring posts saved in the storage channel."""
     chat_id = int(getattr(get_settings(), "storage_channel_id", 0) or 0)
@@ -414,6 +443,12 @@ async def _restore_cmd(message, bot: Bot):
         await message.answer("The userbot is not connected, so I cannot read the storage channel right now.")
         return
     await message.answer("Looking for recurring posts in the storage channel...")
+    if not await _ensure_entity(bot, client, chat_id):
+        await message.answer(
+            "The userbot account cannot see the storage channel. Add that Telegram account "
+            "to the channel as a member (and make sure this bot is an admin), then send "
+            "/restore_recurring again.")
+        return
     try:
         n = await _restore(bot, client, chat_id, merge=True)
     except Exception:
