@@ -524,7 +524,7 @@ def _build_button(rule: RepostRule) -> InlineKeyboardMarkup | None:
     if not rule.inline_button_text or not rule.inline_button_url:
         return None
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=rule.inline_button_text, url=rule.inline_button_url)]]
+        inline_keyboard=[[InlineKeyboardButton(text=rule.inline_button_text, url=_swap_old_bot(rule.inline_button_url))]]
     )
 
 
@@ -1097,3 +1097,40 @@ async def handle_incoming_message(bot: Bot, event) -> None:
 
 
     await _repost_single(bot, message, source, rules)
+
+
+
+# ---------------------------------------------------------------------------
+# Safety net: the old (banned) premium bot must never be forwarded. Whatever a
+# repost rule, caption template, button or source message contains, the old
+# bot link / @username is rewritten to the new bot just before sending.
+# ---------------------------------------------------------------------------
+NEW_BOT_USERNAME = "PREMIUMVVIPKEBOT"
+NEW_BOT_LINK = "https://t.me/PREMIUMVVIPKEBOT?start=start"
+_OLD_BOT_LINK_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?(?:t|telegram)\.me/@?Premiumvvip01bot(?:\?start=[\w-]*)?", re.IGNORECASE)
+_OLD_BOT_MENTION_RE = re.compile(r"@Premiumvvip01bot\b", re.IGNORECASE)
+
+
+def _swap_old_bot(value):
+    if not value or not isinstance(value, str):
+        return value
+    value = _OLD_BOT_LINK_RE.sub(NEW_BOT_LINK, value)
+    return _OLD_BOT_MENTION_RE.sub("@" + NEW_BOT_USERNAME, value)
+
+
+_orig_render_template = _render_template
+_orig_render_repost_content = _render_repost_content
+_orig_translate_button_url = _translate_button_url
+
+
+def _render_template(template, context):
+    return _swap_old_bot(_orig_render_template(template, context))
+
+
+def _render_repost_content(text, entities, rule, dest):
+    return _swap_old_bot(_orig_render_repost_content(text, entities, rule, dest))
+
+
+def _translate_button_url(url, mapping, fallback):
+    return _swap_old_bot(_orig_translate_button_url(url, mapping, fallback))
