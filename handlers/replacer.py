@@ -244,7 +244,7 @@ async def _rl_load(s, old):
     return (await s.execute(q)).scalars().all()
 
 
-@router.message(_Command("replace_link"))
+@router.message(F.text.regexp(r"(?is)^\W{0,3}/?replace_link\b"))
 async def replace_link_cmd(message: types.Message):
     from models import PostStatus
     parts = (message.text or "").split()[1:]
@@ -338,7 +338,7 @@ async def _rl_apply(bot, chat_id, old, new):
 # /check_channels - find channels that were deleted or that the bot can no
 # longer post in (removed, or no longer an admin).
 # ---------------------------------------------------------------------------
-@router.message(_Command("check_channels"))
+@router.message(F.text.regexp(r"(?is)^\W{0,3}/?check_channels\b"))
 async def check_channels_cmd(message: types.Message):
     await message.answer("Checking every registered channel - this can take a minute...")
     _asyncio.create_task(_cc_run(message.bot, message.chat.id))
@@ -352,7 +352,7 @@ async def _cc_run(bot, chat_id):
         async with session() as s:
             chans = (await s.execute(select(Channel).order_by(Channel.id))).scalars().all()
         me = await bot.get_me()
-        gone, noadmin, ok = [], [], 0
+        gone, noadmin, removed, ok = [], [], [], 0
         for ch in chans:
             for _attempt in range(3):
                 try:
@@ -365,14 +365,34 @@ async def _cc_run(bot, chat_id):
                 except TelegramRetryAfter as exc:
                     await _asyncio.sleep(min(exc.retry_after + 1, 60))
                 except Exception as exc:
-                    gone.append((ch, str(exc).split(":")[-1].strip()[:70]))
+                    _full = str(exc).lower()
+                    _why = str(exc).split(":")[-1].strip()[:70]
+                    if "chat not found" in _full or "deactivated" in _full:
+                        removed.append((ch, _why))
+                    else:
+                        gone.append((ch, _why))
                     break
             await _asyncio.sleep(0.25)
+
+        if removed:
+            from sqlalchemy import delete as _sqldelete
+            from models import PostTarget
+            async with session() as s:
+                for ch, _w in removed:
+                    await s.execute(_sqldelete(PostTarget).where(PostTarget.channel_id == ch.id))
+                    obj = await s.get(Channel, ch.id)
+                    if obj is not None:
+                        await s.delete(obj)
+                await s.commit()
 
         def _line(ch, why):
             return f"ID {ch.id} - {_html.escape(ch.title or '?')} ({ch.chat_id}): {_html.escape(why)}"
 
-        lines = [f"Checked {len(chans)} channel(s): {ok} fine, {len(gone)} gone or removed, {len(noadmin)} not admin."]
+        lines = [f"Checked {len(chans)} channel(s): {ok} fine, {len(removed)} deleted and removed from your list, {len(gone)} unreachable, {len(noadmin)} not admin."]
+        if removed:
+            lines.append("")
+            lines.append("Deleted channels, now removed from the list:")
+            lines += [_line(c, w) for c, w in removed]
         if gone:
             lines.append("")
             lines.append("DELETED or the bot was removed:")
