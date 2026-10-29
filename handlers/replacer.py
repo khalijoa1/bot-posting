@@ -491,3 +491,132 @@ async def swap_remove_cmd(message: types.Message):
         n = 1 if rules.pop(parts[0], None) is not None else 0
     swap_rules_save(rules)
     await message.answer(f"Removed {n} rule(s). {len(rules)} left.")
+
+
+
+# ---------------------------------------------------------------------------
+# /scan_links OLD NEW [yes] [limit] - find EVERY message in your channels that
+# contains OLD (text, caption, hidden link or button) by reading the channel
+# history with the userbot, and edit it through the bot (the bot must be admin
+# and the message must have been sent by this bot). Real inline buttons are
+# kept; their links are replaced too. Without "yes" it only counts.
+# ---------------------------------------------------------------------------
+@router.message(F.text.regexp(r"(?is)^\W{0,3}/?scan_links\b"))
+async def scan_links_cmd(message: types.Message):
+    parts = (message.text or "").split()[1:]
+    if len(parts) < 2:
+        await message.answer(
+            "Usage:\n/scan_links OLD_LINK NEW_LINK        (counts only)\n"
+            "/scan_links OLD_LINK NEW_LINK yes    (edits)\n"
+            "Optional last number = how many recent messages to check per channel (default 500, max 5000)."
+        )
+        return
+    old, new = parts[0], parts[1]
+    apply = any(p.lower() == "yes" for p in parts[2:])
+    limit = 500
+    for p in parts[2:]:
+        if p.isdigit():
+            limit = max(1, min(int(p), 5000))
+    if apply:
+        try:
+            from services.reposter import swap_rules_load, swap_rules_save
+            _rules = dict(swap_rules_load())
+            _rules[old] = new
+            swap_rules_save(_rules)
+        except Exception:
+            _rl_log.exception("could not save the link rule")
+    await message.answer(
+        ("Editing" if apply else "Counting") + f" messages with that link in your channels (last {limit} per channel). "
+        "This can take several minutes - I will message you when it is done."
+    )
+    _asyncio.create_task(_scan_links(message.bot, message.chat.id, old, new, apply, limit))
+
+
+async def _scan_links(bot, chat_id, old, new, apply, limit):
+    import html as _h
+    from aiogram.exceptions import TelegramRetryAfter
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    from models import Channel
+    pat = _re.compile(_re.escape(old), _re.IGNORECASE)
+    pat_esc = _re.compile(_re.escape(_h.escape(old, quote=False)), _re.IGNORECASE)
+    st = {"chans": 0, "unreachable": 0, "found": 0, "edited": 0, "notmine": 0, "skipped": 0, "failed": 0}
+    try:
+        from services.storage_channel import _get_client
+        client = await _get_client()
+        if client is None:
+            await bot.send_message(chat_id, "The userbot account is not available, so I cannot read channel history. Nothing was changed.")
+            return
+        from telethon.extensions import html as tl_html
+        async with session() as s:
+            chans = (await s.execute(select(Channel).order_by(Channel.id))).scalars().all()
+        for ch in chans:
+            try:
+                ent = await client.get_input_entity(ch.chat_id)
+            except Exception:
+                st["unreachable"] += 1
+                continue
+            st["chans"] += 1
+            try:
+                async for msg in client.iter_messages(ent, limit=limit):
+                    raw = msg.message or ""
+                    html_text = tl_html.unparse(raw, msg.entities or []) if raw else ""
+                    rows, btn_hit, nonurl = [], False, False
+                    mk = getattr(msg, "reply_markup", None)
+                    for r in (getattr(mk, "rows", None) or []):
+                        row = []
+                        for b in r.buttons:
+                            url = getattr(b, "url", None)
+                            if url:
+                                if pat.search(url):
+                                    btn_hit = True
+                                row.append((b.text, url))
+                            else:
+                                nonurl = True
+                        rows.append(row)
+                    text_hit = bool(html_text) and bool(pat.search(html_text) or pat_esc.search(html_text))
+                    if not (text_hit or btn_hit):
+                        continue
+                    st["found"] += 1
+                    if not apply:
+                        continue
+                    if nonurl:
+                        st["skipped"] += 1
+                        continue
+                    new_html = pat.sub(lambda m: new, pat_esc.sub(lambda m: _h.escape(new, quote=False), html_text))
+                    kb = [[InlineKeyboardButton(text=tx, url=pat.sub(lambda m: new, u)) for tx, u in row] for row in rows if row]
+                    markup = InlineKeyboardMarkup(inline_keyboard=kb) if kb else None
+                    is_media = bool(msg.media) and type(msg.media).__name__ != "MessageMediaWebPage"
+                    for _attempt in range(3):
+                        try:
+                            if is_media:
+                                await bot.edit_message_caption(chat_id=ch.chat_id, message_id=msg.id,
+                                                               caption=new_html or None, parse_mode="HTML", reply_markup=markup)
+                            else:
+                                await bot.edit_message_text(chat_id=ch.chat_id, message_id=msg.id,
+                                                            text=new_html, parse_mode="HTML", reply_markup=markup)
+                            st["edited"] += 1
+                            break
+                        except TelegramRetryAfter as exc:
+                            await _asyncio.sleep(min(exc.retry_after + 1, 60))
+                        except Exception as exc:
+                            m = str(exc).lower()
+                            if "can't be edited" in m or "not found" in m or "not modified" in m:
+                                st["notmine"] += 1
+                            else:
+                                st["failed"] += 1
+                                _rl_log.warning("scan_links: channel %s message %s: %s", ch.chat_id, msg.id, exc)
+                            break
+                    await _asyncio.sleep(0.6)
+            except Exception:
+                _rl_log.exception("scan_links: channel %s failed", ch.chat_id)
+    except Exception:
+        _rl_log.exception("scan_links failed")
+        await bot.send_message(chat_id, "scan_links stopped because of an error - see the logs.")
+        return
+    head = f"Checked {st['chans']} channel(s) ({st['unreachable']} could not be read by the userbot). Found {st['found']} message(s) with that link."
+    if apply:
+        body = (f"\nEdited {st['edited']}. Not editable (not sent by this bot) {st['notmine']}. "
+                f"Skipped (has non-link buttons) {st['skipped']}. Failed {st['failed']}.")
+    else:
+        body = f"\nTo edit them, send:\n/scan_links {old} {new} yes"
+    await bot.send_message(chat_id, head + body)
