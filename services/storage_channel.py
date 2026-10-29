@@ -298,6 +298,9 @@ def _to_html(msg):
 
 
 async def _on_edit(event):
+    # Disabled: the storage channel is a read-only backup. Writing channel edits
+    # back into live posts rewrote post text and could corrupt composed posts.
+    return
     try:
         msg = event.message
         parsed = parse_message(msg.raw_text or "", _to_html(msg))
