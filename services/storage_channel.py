@@ -533,7 +533,7 @@ async def run_storage_sync(bot: Bot) -> None:
 
     while True:
         try:
-            await _mirror_pass(bot, chat_id)
+            pass  # mirror disabled: composed posts are copied to the storage channel when composed (handlers/compose.py)
         except Exception:
             logger.exception("storage: mirror pass failed")
         await asyncio.sleep(POLL_SECONDS)
