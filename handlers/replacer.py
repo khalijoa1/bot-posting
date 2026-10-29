@@ -216,3 +216,182 @@ async def handle_new_link(message: types.Message, state: FSMContext):
 async def replacer_button(message: types.Message, state: FSMContext):
     """Link replacer from menu."""
     await replacer_start(message, state)
+
+
+
+# ---------------------------------------------------------------------------
+# /replace_link OLD NEW [yes] - swap a link inside every post, including the
+# messages already live in your channels (the bot must be an admin there).
+# ---------------------------------------------------------------------------
+import asyncio as _asyncio
+import logging as _logging
+import re as _re
+
+from aiogram.filters import Command as _Command
+from sqlalchemy import or_ as _or
+from sqlalchemy.orm import selectinload as _selectinload
+
+_rl_log = _logging.getLogger("replace-link")
+
+
+async def _rl_load(s, old):
+    from models import PostTarget
+    q = (
+        select(Post)
+        .where(_or(Post.text.contains(old, autoescape=True), Post.button_url.contains(old, autoescape=True)))
+        .options(_selectinload(Post.targets).selectinload(PostTarget.channel))
+    )
+    return (await s.execute(q)).scalars().all()
+
+
+@router.message(_Command("replace_link"))
+async def replace_link_cmd(message: types.Message):
+    from models import PostStatus
+    parts = (message.text or "").split()[1:]
+    if len(parts) not in (2, 3):
+        await message.answer(
+            "Usage:\n/replace_link OLD_LINK NEW_LINK\n\nIt first shows what it would change. "
+            "To apply it, add yes at the end:\n/replace_link OLD_LINK NEW_LINK yes"
+        )
+        return
+    old, new = parts[0], parts[1]
+    apply = len(parts) == 3 and parts[2].lower() == "yes"
+    if old.lower() == new.lower():
+        await message.answer("The old and new links are the same.")
+        return
+    if not apply:
+        async with session() as s:
+            posts = await _rl_load(s, old)
+            live = sum(1 for p in posts if p.status == PostStatus.SENT for t in p.targets if t.message_id is not None)
+            nobtn = sum(1 for p in posts if p.status == PostStatus.SENT and not p.button_text
+                        for t in p.targets if t.message_id is not None)
+        await message.answer(
+            f"Found {len(posts)} post(s) containing that link.\n"
+            f"{live} live message(s) would be edited in your channels.\n"
+            f"{nobtn} of them have no inline button saved - if one currently shows a button, editing may remove it.\n\n"
+            f"To apply, send:\n/replace_link {old} {new} yes"
+        )
+        return
+    await message.answer("Started. Editing posts in your channels - I will message you when it is finished.")
+    _asyncio.create_task(_rl_apply(message.bot, message.chat.id, old, new))
+
+
+async def _rl_apply(bot, chat_id, old, new):
+    from aiogram.exceptions import TelegramRetryAfter
+    from models import ContentType, PostStatus
+    from handlers.compose import _build_button
+    pat = _re.compile(_re.escape(old), _re.IGNORECASE)
+    stats = {"posts": 0, "edited": 0, "same": 0, "gone": 0, "failed": 0}
+    try:
+        async with session() as s:
+            posts = await _rl_load(s, old)
+            for post in posts:
+                if post.text:
+                    post.text = pat.sub(lambda m: new, post.text)
+                if post.button_url:
+                    post.button_url = pat.sub(lambda m: new, post.button_url)
+                stats["posts"] += 1
+                if post.status == PostStatus.SENT:
+                    markup = _build_button(post.button_text, post.button_url)
+                    for t in post.targets:
+                        if t.message_id is None or t.channel is None:
+                            continue
+                        for _attempt in range(3):
+                            try:
+                                if post.content_type == ContentType.TEXT:
+                                    await bot.edit_message_text(
+                                        chat_id=t.channel.chat_id, message_id=t.message_id,
+                                        text=post.text or "", reply_markup=markup)
+                                else:
+                                    await bot.edit_message_caption(
+                                        chat_id=t.channel.chat_id, message_id=t.message_id,
+                                        caption=post.text or None, reply_markup=markup)
+                                stats["edited"] += 1
+                                break
+                            except TelegramRetryAfter as exc:
+                                await _asyncio.sleep(min(exc.retry_after + 1, 60))
+                            except Exception as exc:
+                                m = str(exc).lower()
+                                if "not modified" in m:
+                                    stats["same"] += 1
+                                elif "not found" in m or "can't be edited" in m:
+                                    stats["gone"] += 1
+                                else:
+                                    stats["failed"] += 1
+                                    _rl_log.warning("replace_link: post %s channel %s: %s", post.id, t.channel.chat_id, exc)
+                                break
+                        await _asyncio.sleep(0.6)
+                await s.commit()
+    except Exception:
+        _rl_log.exception("replace_link failed")
+        await bot.send_message(chat_id, "replace_link stopped because of an error - see the logs. Send the same command again; finished posts are already done.")
+        return
+    await bot.send_message(
+        chat_id,
+        f"Done. {stats['posts']} post(s) updated, {stats['edited']} channel message(s) edited, "
+        f"{stats['same']} already up to date, {stats['gone']} no longer exist, {stats['failed']} failed.",
+    )
+
+
+
+# ---------------------------------------------------------------------------
+# /check_channels - find channels that were deleted or that the bot can no
+# longer post in (removed, or no longer an admin).
+# ---------------------------------------------------------------------------
+@router.message(_Command("check_channels"))
+async def check_channels_cmd(message: types.Message):
+    await message.answer("Checking every registered channel - this can take a minute...")
+    _asyncio.create_task(_cc_run(message.bot, message.chat.id))
+
+
+async def _cc_run(bot, chat_id):
+    import html as _html
+    from aiogram.exceptions import TelegramRetryAfter
+    from models import Channel
+    try:
+        async with session() as s:
+            chans = (await s.execute(select(Channel).order_by(Channel.id))).scalars().all()
+        me = await bot.get_me()
+        gone, noadmin, ok = [], [], 0
+        for ch in chans:
+            for _attempt in range(3):
+                try:
+                    m = await bot.get_chat_member(ch.chat_id, me.id)
+                    if getattr(m.status, "value", str(m.status)) in ("administrator", "creator"):
+                        ok += 1
+                    else:
+                        noadmin.append((ch, getattr(m.status, "value", str(m.status))))
+                    break
+                except TelegramRetryAfter as exc:
+                    await _asyncio.sleep(min(exc.retry_after + 1, 60))
+                except Exception as exc:
+                    gone.append((ch, str(exc).split(":")[-1].strip()[:70]))
+                    break
+            await _asyncio.sleep(0.25)
+
+        def _line(ch, why):
+            return f"ID {ch.id} - {_html.escape(ch.title or '?')} ({ch.chat_id}): {_html.escape(why)}"
+
+        lines = [f"Checked {len(chans)} channel(s): {ok} fine, {len(gone)} gone or removed, {len(noadmin)} not admin."]
+        if gone:
+            lines.append("")
+            lines.append("DELETED or the bot was removed:")
+            lines += [_line(c, w) for c, w in gone]
+        if noadmin:
+            lines.append("")
+            lines.append("Bot is no longer an admin:")
+            lines += [_line(c, w) for c, w in noadmin]
+        if gone or noadmin:
+            lines.append("")
+            lines.append("To stop posting there, remove them with /delete_channel.")
+        chunk = ""
+        for ln in lines:
+            if len(chunk) + len(ln) + 1 > 3500:
+                await bot.send_message(chat_id, chunk)
+                chunk = ""
+            chunk += ln + "\n"
+        if chunk:
+            await bot.send_message(chat_id, chunk)
+    except Exception:
+        _rl_log.exception("check_channels failed")
+        await bot.send_message(chat_id, "check_channels failed - see the logs.")
