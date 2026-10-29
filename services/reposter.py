@@ -1116,7 +1116,10 @@ def _swap_old_bot(value):
     if not value or not isinstance(value, str):
         return value
     value = _OLD_BOT_LINK_RE.sub(NEW_BOT_LINK, value)
-    return _OLD_BOT_MENTION_RE.sub("@" + NEW_BOT_USERNAME, value)
+    value = _OLD_BOT_MENTION_RE.sub("@" + NEW_BOT_USERNAME, value)
+    for _old, _new in swap_rules_load().items():
+        value = re.sub(re.escape(_old), lambda m, _n=_new: _n, value, flags=re.IGNORECASE)
+    return value
 
 
 _orig_render_template = _render_template
@@ -1134,3 +1137,49 @@ def _render_repost_content(text, entities, rule, dest):
 
 def _translate_button_url(url, mapping, fallback):
     return _swap_old_bot(_orig_translate_button_url(url, mapping, fallback))
+
+
+
+# ---------------------------------------------------------------------------
+# Saved link rules (managed with /swap_add, /swap_list, /swap_remove and also
+# saved by /replace_link ... yes). Applied to everything the repost feature
+# sends, on top of the built-in old-bot rewrite above. Stored next to the
+# database so they survive restarts and redeploys.
+# ---------------------------------------------------------------------------
+import os as _os
+import time as _time
+
+_SWAP_CACHE = {"t": 0.0, "rules": {}}
+
+
+def _swap_path():
+    try:
+        from db import engine
+        d = engine.url.database
+        base = _os.path.dirname(d) if d else "."
+    except Exception:
+        base = "."
+    return _os.path.join(base or ".", "link_swaps.json")
+
+
+def swap_rules_load():
+    now = _time.time()
+    if now - _SWAP_CACHE["t"] < 30:
+        return _SWAP_CACHE["rules"]
+    try:
+        with open(_swap_path(), "r", encoding="utf-8") as fh:
+            rules = json.load(fh)
+        if not isinstance(rules, dict):
+            rules = {}
+    except Exception:
+        rules = {}
+    _SWAP_CACHE["t"] = now
+    _SWAP_CACHE["rules"] = rules
+    return rules
+
+
+def swap_rules_save(rules):
+    with open(_swap_path(), "w", encoding="utf-8") as fh:
+        json.dump(rules, fh, ensure_ascii=False, indent=0)
+    _SWAP_CACHE["t"] = _time.time()
+    _SWAP_CACHE["rules"] = dict(rules)
