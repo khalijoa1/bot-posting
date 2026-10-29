@@ -96,7 +96,7 @@ async def init_db() -> None:
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='posts'"
         )
         row = result.fetchone()
-        if row and row[0] and "album" not in row[0].lower():
+        if row and row[0] and "check" in row[0].lower() and "album" not in row[0].lower():
             # Defensive: a *previous* migration (the one that added VIDEO
             # support) used this same posts_old -> rebuild -> drop dance and,
             # going by production logs, left a posts_old table behind
@@ -117,12 +117,10 @@ async def init_db() -> None:
             # restart - drop it explicitly first so the name is free again.
             await conn.exec_driver_sql("DROP INDEX IF EXISTS ix_posts_owner_user_id")
             await conn.run_sync(lambda sync_conn: models.Post.__table__.create(sync_conn))
-            await conn.exec_driver_sql(
-                "INSERT INTO posts (id, owner_user_id, content_type, text, photo_file_id, "
-                "video_file_id, status, scheduled_time, auto_delete_seconds, delete_at, created_at) "
-                "SELECT id, owner_user_id, content_type, text, photo_file_id, "
-                "video_file_id, status, scheduled_time, auto_delete_seconds, delete_at, created_at FROM posts_old"
-            )
+            _old_cols = [r[1] for r in (await conn.exec_driver_sql("PRAGMA table_info('posts_old')")).fetchall()]
+            _new_cols = [r[1] for r in (await conn.exec_driver_sql("PRAGMA table_info('posts')")).fetchall()]
+            _common = ", ".join(c for c in _old_cols if c in _new_cols)
+            await conn.exec_driver_sql(f"INSERT INTO posts ({_common}) SELECT {_common} FROM posts_old")
             await conn.exec_driver_sql("DROP TABLE posts_old")
 
 
