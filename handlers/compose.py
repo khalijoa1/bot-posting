@@ -618,6 +618,21 @@ def _split_result(result) -> tuple[int | None, str | None]:
     return result.message_id, None
 
 
+async def _forward_to_storage(bot, content_type, text, photo_file_id, video_file_id, album_items, reply_markup) -> None:
+    """Copy a composed post, exactly as composed (same text, media and inline
+    button), into the storage channel. Never blocks or breaks posting."""
+    try:
+        import logging
+        from config import get_settings
+        chat_id = int(getattr(get_settings(), "storage_channel_id", 0) or 0)
+        if not chat_id or bot is None:
+            return
+        await _send_to_channel(bot, chat_id, content_type, text, photo_file_id, video_file_id, album_items, reply_markup=reply_markup)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("could not copy the composed post to the storage channel")
+
+
 async def post_now(state: FSMContext, bot, user_id: int, answer) -> None:
     """Post immediately."""
     data = await state.get_data()
@@ -686,6 +701,8 @@ async def post_now(state: FSMContext, bot, user_id: int, answer) -> None:
         await s.commit()
         post_id = post.id
 
+    await _forward_to_storage(bot, content_type, text, photo_file_id, video_file_id, album_items, reply_markup)
+
     result = f"✅ POSTED!\n\n━━━━━━━━━━\n{success}/{len(channels)}\n━━━━━━━━━━\nID: {post_id}"
     if button_text and button_url:
         result += f"\n🔘 Button: {button_text}"
@@ -748,6 +765,8 @@ async def post_scheduled(state: FSMContext, user_id: int, answer) -> None:
 
         await s.commit()
         post_id = post.id
+
+    await _forward_to_storage(getattr(getattr(answer, "__self__", None), "bot", None), content_type, text, photo_file_id, video_file_id, album_items, _build_button(button_text, button_url))
 
     time_str = scheduled_time.strftime("%Y-%m-%d %H:%M")
     result = (
