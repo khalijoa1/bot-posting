@@ -272,6 +272,13 @@ async def replace_link_cmd(message: types.Message):
             f"To apply, send:\n/replace_link {old} {new} yes"
         )
         return
+    try:
+        from services.reposter import swap_rules_load, swap_rules_save
+        _rules = dict(swap_rules_load())
+        _rules[old] = new
+        swap_rules_save(_rules)
+    except Exception:
+        _rl_log.exception("could not save the link rule")
     await message.answer("Started. Editing posts in your channels - I will message you when it is finished.")
     _asyncio.create_task(_rl_apply(message.bot, message.chat.id, old, new))
 
@@ -415,3 +422,72 @@ async def _cc_run(bot, chat_id):
     except Exception:
         _rl_log.exception("check_channels failed")
         await bot.send_message(chat_id, "check_channels failed - see the logs.")
+
+
+
+# ---------------------------------------------------------------------------
+# Saved link rules: /swap_add, /swap_list, /swap_remove. Every saved rule is
+# applied automatically to everything the repost/forward feature sends.
+# Use /replace_link to also fix posts that are already live.
+# ---------------------------------------------------------------------------
+@router.message(F.text.regexp(r"(?is)^\W{0,3}/?swap_add\b"))
+async def swap_add_cmd(message: types.Message):
+    from services.reposter import swap_rules_load, swap_rules_save
+    lines = (message.text or "").splitlines()
+    rows = [lines[0].split()[1:]] + [ln.split() for ln in lines[1:]] if lines else []
+    pairs = [(r[0], r[1]) for r in rows if len(r) >= 2]
+    if not pairs:
+        await message.answer(
+            "Usage - one pair per line, OLD then NEW:\n"
+            "/swap_add https://t.me/OldBot?start=start https://t.me/NewBot?start=start\n"
+            "https://old.example.com https://new.example.com\n\n"
+            "Saved rules apply automatically to everything forwarded from now on. "
+            "To fix posts that are already live, also run /replace_link."
+        )
+        return
+    rules = dict(swap_rules_load())
+    for old, new in pairs:
+        rules[old] = new
+    swap_rules_save(rules)
+    await message.answer(
+        f"Saved {len(pairs)} rule(s). {len(rules)} rule(s) are active. "
+        "Everything forwarded from now on uses them. For posts already live, run /replace_link OLD NEW."
+    )
+
+
+@router.message(F.text.regexp(r"(?is)^\W{0,3}/?swap_list\b"))
+async def swap_list_cmd(message: types.Message):
+    import html as _html
+    from services.reposter import swap_rules_load
+    rules = swap_rules_load()
+    if not rules:
+        await message.answer("No saved link rules yet. Add some with /swap_add. (The old Premiumvvip01bot link is always replaced.)")
+        return
+    out = ["Saved link rules (OLD -> NEW):"]
+    for old, new in rules.items():
+        out.append(_html.escape(old) + " -> " + _html.escape(new))
+    chunk = ""
+    for ln in out:
+        if len(chunk) + len(ln) + 1 > 3500:
+            await message.answer(chunk)
+            chunk = ""
+        chunk += ln + "\n"
+    if chunk:
+        await message.answer(chunk)
+
+
+@router.message(F.text.regexp(r"(?is)^\W{0,3}/?swap_remove\b"))
+async def swap_remove_cmd(message: types.Message):
+    from services.reposter import swap_rules_load, swap_rules_save
+    parts = (message.text or "").split()[1:]
+    if not parts:
+        await message.answer("Usage: /swap_remove OLD_LINK   (or /swap_remove all)")
+        return
+    rules = dict(swap_rules_load())
+    if parts[0].lower() == "all":
+        n = len(rules)
+        rules = {}
+    else:
+        n = 1 if rules.pop(parts[0], None) is not None else 0
+    swap_rules_save(rules)
+    await message.answer(f"Removed {n} rule(s). {len(rules)} left.")
