@@ -99,8 +99,18 @@ async def _cleanup(bot: Bot):
         try:
             await bot.delete_message(chat_id=chat_id, message_id=reply_id)
             logger.info("half-reply: deleted reply %s in %s", reply_id, chat_id)
-        except Exception:
-            logger.info("half-reply: reply %s in %s was already gone or could not be deleted", reply_id, chat_id)
+        except Exception as exc:
+            _m = str(exc).lower()
+            _permanent = any(x in _m for x in ("not found", "can't be deleted", "message_id_invalid", "chat not found", "forbidden", "kicked", "not enough rights"))
+            try:
+                _age = (now - datetime.fromisoformat(cycle)).total_seconds()
+            except Exception:
+                _age = 0
+            if not _permanent and _age < 86400:
+                logger.warning("half-reply: could not delete reply %s in %s yet (%s) - will retry", reply_id, chat_id, exc)
+                await asyncio.sleep(min(float(getattr(exc, "retry_after", 1) or 1), 30))
+                continue
+            logger.info("half-reply: reply %s in %s gone or cannot be deleted (%s)", reply_id, chat_id, exc)
         async with session() as s:
             await s.execute(text("UPDATE half_reply SET done = 1 WHERE target_id = :t AND cycle = :y"),
                             {"t": target_id, "y": cycle})
