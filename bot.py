@@ -90,6 +90,55 @@ async def main() -> None:
     # the more specific routers above get a chance to handle them.
     dp.include_router(moderation.router)
 
+    # Slash-command menu (the list that pops up when you type "/")
+    try:
+        from aiogram.types import BotCommand as _BC
+        _cmds = [
+            ("compose", "Post to channels (schedule, auto-delete, repeat)"),
+            ("bulkpost", "Forward several messages, post them all at once"),
+            ("post_category", "Post to a category"),
+            ("myposts", "View your posts"),
+            ("edit", "Edit a post"),
+            ("delete", "Delete a post"),
+            ("repeat", "Set repeat: /repeat 123 6h"),
+            ("autodelete", "Set auto-delete: /autodelete 123 6h (0 = off)"),
+            ("pause", "Stop a post repeating: /pause 123"),
+            ("replacer", "Replace links"),
+            ("replace_link", "Replace a link in all posts: OLD NEW [yes]"),
+            ("scan_links", "Edit every channel post that has an old link"),
+            ("swap_add", "Save a link swap rule: OLD NEW"),
+            ("swap_list", "Show saved link swap rules"),
+            ("swap_remove", "Remove a link swap rule"),
+            ("check_channels", "Find and remove deleted channels"),
+            ("add_channel", "Add a channel"),
+            ("list_channels", "View channels"),
+            ("delete_channel", "Remove a channel"),
+            ("add_category", "Create a category"),
+            ("list_categories", "View categories"),
+            ("add_group", "Register a group"),
+            ("list_groups", "View groups"),
+            ("remove_group", "Stop moderating a group"),
+            ("moderation", "Configure moderation rules"),
+            ("add_source", "Watch a channel"),
+            ("list_sources", "View watched channels"),
+            ("remove_source", "Stop watching a channel"),
+            ("add_rule", "Forward source to your channel"),
+            ("list_rules", "View forwarding rules"),
+            ("remove_rule", "Remove a forwarding rule"),
+            ("autoapprove", "Auto-approve join requests"),
+            ("autocomment", "Fixed comment under every post"),
+            ("broadcast", "Message everyone who sent a join request"),
+            ("analytics", "Stats and channel growth"),
+            ("files", "File sharing"),
+            ("reply_pause", "Pause auto replies"),
+            ("reply_resume", "Resume auto replies"),
+            ("help", "Show all commands"),
+            ("cancel", "Cancel what you are doing"),
+        ]
+        await bot.set_my_commands([_BC(command=c, description=t) for c, t in _cmds])
+    except Exception as _exc:
+        logging.getLogger(__name__).warning("set_my_commands failed: %s", _exc)
+
     # Background jobs: auto-delete of sent posts, sending of due scheduled posts,
     # the optional Telethon userbot that watches source channels for reposting,
     # periodic channel member-count snapshots for /analytics growth stats, and
