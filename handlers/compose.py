@@ -246,6 +246,7 @@ async def handle_channels(query: types.CallbackQuery, state: FSMContext):
         q = select(Channel)
         res = await s.execute(q)
         channels = res.scalars().all()
+    channels = await _drop_dead_channels(query.bot, channels)
 
     kb = types.InlineKeyboardMarkup(
         inline_keyboard=[
