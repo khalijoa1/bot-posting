@@ -97,6 +97,8 @@ async def bulkpost_ask_channels(query: types.CallbackQuery, state: FSMContext):
         q = select(Channel)
         res = await s.execute(q)
         channels = res.scalars().all()
+    from handlers.compose import _drop_dead_channels as _ddc
+    channels = await _ddc(query.bot, channels)
 
     if not channels:
         await query.message.answer(
@@ -161,6 +163,8 @@ async def bulkpost_handle_channels(query: types.CallbackQuery, state: FSMContext
         q = select(Channel)
         res = await s.execute(q)
         channels = res.scalars().all()
+    from handlers.compose import _drop_dead_channels as _ddc
+    channels = await _ddc(query.bot, channels)
 
     kb = types.InlineKeyboardMarkup(
         inline_keyboard=[
