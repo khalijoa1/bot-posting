@@ -68,23 +68,33 @@ async def _drop_dead_channels(bot, channels):
     now = _t.time()
 
     async def _chk(ch):
+        # returns (usable, delete_row)
         ts = _ALIVE_CACHE.get(ch.chat_id)
         if ts and now - ts < 600:
-            return True
+            return (True, False)
         try:
             await _aio.wait_for(bot.get_chat(ch.chat_id), 10)
+            me = await _aio.wait_for(bot.get_me(), 10)
+            m = await _aio.wait_for(bot.get_chat_member(ch.chat_id, me.id), 10)
+            st = getattr(m.status, "value", str(m.status))
+            if st not in ("administrator", "creator"):
+                return (False, False)
             _ALIVE_CACHE[ch.chat_id] = now
-            return True
+            return (True, False)
         except Exception as exc:
-            m = str(exc).lower()
-            return not ("chat not found" in m or "deactivated" in m)
+            msg = str(exc).lower()
+            if "chat not found" in msg or "deactivated" in msg:
+                return (False, True)
+            if any(k in msg for k in ("kicked", "forbidden", "not a member", "not enough rights", "left the")):
+                return (False, False)
+            return (True, False)
 
     try:
         flags = await _aio.gather(*[_chk(c) for c in channels])
     except Exception:
         return channels
-    alive = [c for c, ok in zip(channels, flags) if ok]
-    dead = [c for c, ok in zip(channels, flags) if not ok]
+    alive = [c for c, f in zip(channels, flags) if f[0]]
+    dead = [c for c, f in zip(channels, flags) if f[1]]
     if dead:
         try:
             async with session() as s:
