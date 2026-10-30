@@ -57,6 +57,48 @@ async def cancel_compose(message: types.Message, state: FSMContext):
     await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
 
 
+_ALIVE_CACHE = {}
+
+
+async def _drop_dead_channels(bot, channels):
+    """Hide (and delete) channels Telegram says no longer exist."""
+    import asyncio as _aio, time as _t
+    from sqlalchemy import delete as _sqldelete
+    from models import PostTarget
+    now = _t.time()
+
+    async def _chk(ch):
+        ts = _ALIVE_CACHE.get(ch.chat_id)
+        if ts and now - ts < 600:
+            return True
+        try:
+            await _aio.wait_for(bot.get_chat(ch.chat_id), 10)
+            _ALIVE_CACHE[ch.chat_id] = now
+            return True
+        except Exception as exc:
+            m = str(exc).lower()
+            return not ("chat not found" in m or "deactivated" in m)
+
+    try:
+        flags = await _aio.gather(*[_chk(c) for c in channels])
+    except Exception:
+        return channels
+    alive = [c for c, ok in zip(channels, flags) if ok]
+    dead = [c for c, ok in zip(channels, flags) if not ok]
+    if dead:
+        try:
+            async with session() as s:
+                for ch in dead:
+                    await s.execute(_sqldelete(PostTarget).where(PostTarget.channel_id == ch.id))
+                    obj = await s.get(Channel, ch.id)
+                    if obj is not None:
+                        await s.delete(obj)
+                await s.commit()
+        except Exception:
+            pass
+    return alive
+
+
 async def _ask_channels(message: types.Message, state: FSMContext, preview: str) -> None:
     """Show the channel-selection step. Shared by the text/photo/video/album
     entry points so every content type goes through the same rest of the
@@ -66,6 +108,7 @@ async def _ask_channels(message: types.Message, state: FSMContext, preview: str)
         q = select(Channel)
         res = await s.execute(q)
         channels = res.scalars().all()
+    channels = await _drop_dead_channels(message.bot, channels)
 
     if not channels:
         await message.answer(
