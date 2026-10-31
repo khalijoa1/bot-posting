@@ -374,20 +374,37 @@ async def delete_confirm(message: types.Message, state: FSMContext):
         await message.answer("❌ Cancelled", reply_markup=main_menu_kb())
         return
 
-    try:
-        ch_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Invalid ID", reply_markup=_cancel_kb())
-        return
-
+    _raw = (message.text or "").strip()
     async with session() as s:
-        ch = await s.get(Channel, ch_id)
+        ch = None
+        try:
+            _num = int(_raw)
+            ch = await s.get(Channel, _num)
+            if ch is None:
+                ch = (await s.execute(select(Channel).where(Channel.chat_id == _num))).scalars().first()
+        except ValueError:
+            _all = (await s.execute(select(Channel))).scalars().all()
+            _hits = [c for c in _all if _raw.lower() in (c.title or "").lower()]
+            if len(_hits) == 1:
+                ch = _hits[0]
+            elif len(_hits) > 1:
+                await message.answer(
+                    "❌ More than one channel matches. Send the ID number instead:\n"
+                    + "\n".join(f"ID {c.id} - {c.title}" for c in _hits[:20]),
+                    reply_markup=_cancel_kb())
+                return
         if not ch:
             await message.answer("❌ Not found", reply_markup=main_menu_kb())
             await state.clear()
             return
 
         title = ch.title
+        try:
+            from sqlalchemy import delete as _sqldel
+            from models import PostTarget as _PT
+            await s.execute(_sqldel(_PT).where(_PT.channel_id == ch.id))
+        except Exception:
+            pass
         await s.delete(ch)
         await s.commit()
 
