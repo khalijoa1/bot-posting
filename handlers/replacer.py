@@ -620,3 +620,79 @@ async def _scan_links(bot, chat_id, old, new, apply, limit):
     else:
         body = f"\nTo edit them, send:\n/scan_links {old} {new} yes"
     await bot.send_message(chat_id, head + body)
+
+
+
+# ---------------------------------------------------------------------------
+# /check_banned - uses the userbot to find channels Telegram banned/restricted
+# or that the userbot can no longer see. "/check_banned remove" deletes the
+# ones flagged as banned from the bot's channel list.
+# ---------------------------------------------------------------------------
+@router.message(F.text.regexp(r"(?is)^\W{0,3}/?check_banned\b"))
+async def check_banned_cmd(message: types.Message):
+    _remove = "remove" in (message.text or "").lower().split()[1:]
+    await message.answer("Checking channels with the userbot - this can take a few minutes...")
+    _asyncio.create_task(_cb_run(message.bot, message.chat.id, _remove))
+
+
+async def _cb_run(bot, chat_id, remove):
+    import html as _hh
+    from sqlalchemy import delete as _sqldelete
+    from models import Channel, PostTarget
+    try:
+        from services.storage_channel import _get_client
+        client = await _get_client()
+        if client is None:
+            await bot.send_message(chat_id, "The userbot is not connected, so I cannot check.")
+            return
+        try:
+            await client.get_dialogs()  # fills the userbot's cache of channels it is in
+        except Exception:
+            pass
+        async with session() as s:
+            chans = (await s.execute(select(Channel).order_by(Channel.id))).scalars().all()
+        banned, unseen, ok = [], [], 0
+        for ch in chans:
+            try:
+                ent = await client.get_entity(ch.chat_id)
+                if getattr(ent, "restricted", False) or getattr(ent, "scam", False) or getattr(ent, "fake", False):
+                    _rr = getattr(ent, "restriction_reason", None) or []
+                    _why = "; ".join(str(getattr(r, "reason", r)) for r in _rr)[:60] or "restricted"
+                    banned.append((ch, _why))
+                else:
+                    ok += 1
+            except Exception as exc:
+                _n = type(exc).__name__
+                if "Banned" in _n or "Deactivated" in _n:
+                    banned.append((ch, _n))
+                else:
+                    unseen.append((ch, _n))
+            await _asyncio.sleep(0.3)
+
+        removed = 0
+        if remove and banned:
+            async with session() as s:
+                for ch, _w in banned:
+                    await s.execute(_sqldelete(PostTarget).where(PostTarget.channel_id == ch.id))
+                    obj = await s.get(Channel, ch.id)
+                    if obj is not None:
+                        await s.delete(obj)
+                        removed += 1
+                await s.commit()
+
+        def _ln(ch, why):
+            return f"ID {ch.id} - {_hh.escape(ch.title or '?')} ({ch.chat_id}): {_hh.escape(why)}"
+
+        out = [f"Checked {len(chans)} channel(s): {ok} fine, {len(banned)} banned/restricted, {len(unseen)} not visible to the userbot."]
+        if banned:
+            out.append("\nBANNED / RESTRICTED:" + ("  (removed from your list)" if remove else "  (send /check_banned remove to delete these)"))
+            out += [_ln(c, w) for c, w in banned]
+        if unseen:
+            out.append("\nNOT VISIBLE to the userbot (banned, deleted, or it is not a member). Delete by hand with /delete_channel if dead:")
+            out += [_ln(c, w) for c, w in unseen]
+        text = "\n".join(out)
+        for i in range(0, len(text), 3800):
+            await bot.send_message(chat_id, text[i:i + 3800], parse_mode="HTML")
+    except Exception:
+        _rl_log.exception("check_banned failed")
+        await bot.send_message(chat_id, "check_banned failed - see the logs.")
